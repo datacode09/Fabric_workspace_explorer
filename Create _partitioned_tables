@@ -37,6 +37,25 @@ assert SILVER_SCHEMA in schemas, f"❌ Schema '{SILVER_SCHEMA}' not created!"
 print(f"✅ Schema '{SILVER_SCHEMA}' ready")
 print(f"   All schemas: {schemas}")
 
+# ============================================================
+# CELL 2 — VERIFY SILVER SCHEMA EXISTS (Fabric-correct)
+# ============================================================
+
+# Silver schema already exists in your lakehouse (visible in Explorer)
+# Just verify it's accessible — no need to create or set database
+
+schemas = [db.name for db in spark.catalog.listDatabases()]
+print(f"Available schemas: {schemas}")
+
+if SILVER_SCHEMA in schemas:
+    print(f"✅ Schema '{SILVER_SCHEMA}' is ready")
+else:
+    # Only runs if silver somehow disappeared
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{LAKEHOUSE_NAME}`.`{SILVER_SCHEMA}`")
+    print(f"✅ Schema '{SILVER_SCHEMA}' created")
+
+print(f"   Current database: {spark.catalog.currentDatabase()}")
+
 
 # ============================================================
 # CELL 3 — HELPER FUNCTIONS

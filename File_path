@@ -1,0 +1,27 @@
+from notebookutils import mssparkutils
+
+# Get attached lakehouse
+lh = mssparkutils.lakehouse.get("aflh_GOLD_DEH_FILEGEN_PIQ_SRC_DATA")
+lakehouse_id = lh.id
+workspace_id = lh.workspaceId
+
+base_path = f"abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{lakehouse_id}/Tables"
+
+print(f"{'='*70}")
+print(f"  LAKEHOUSE: aflh_GOLD_DEH_FILEGEN_PIQ_SRC_DATA")
+print(f"  Base Path: {base_path}")
+print(f"{'='*70}\n")
+
+# List all tables via Spark catalog
+tables = spark.catalog.listTables()
+
+print(f"{'TABLE NAME':<45} {'TYPE':<12} {'FULL PATH'}")
+print(f"{'-'*45} {'-'*12} {'-'*60}")
+
+for t in tables:
+    tbl_type = t.tableType  # MANAGED or EXTERNAL
+    full_name = f"{t.database}.{t.name}" if t.database else t.name
+    full_path = f"{base_path}/{t.database}/{t.name}" if t.database else f"{base_path}/{t.name}"
+    print(f"{full_name:<45} {tbl_type:<12} {full_path}")
+
+print(f"\nTotal tables: {len(tables)}")

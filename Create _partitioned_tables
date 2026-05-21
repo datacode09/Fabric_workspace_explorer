@@ -115,6 +115,27 @@ def write_hist_partition(bronze_tbl, hist_tbl):
     print(f"    ✓ HIST → {SILVER_SCHEMA}.{hist_tbl:<48} {count:>10,} rows  [PARTITION: {dates_in_batch}]")
     return count
 
+def write_hist_partition(bronze_tbl, hist_tbl):
+    df = (spark.table(f"{BRONZE_SCHEMA}.{bronze_tbl}")
+               .withColumn("SILVER_LOAD_TS", F.current_timestamp())
+               # ── Cast timestamp → date for clean partitioning ──
+               .withColumn("INGESTION_DATE", F.to_date(F.col("INGESTION_DATE"))))
+
+    validate_ingestion_date(df, bronze_tbl)
+
+    dates_in_batch = [r[0] for r in df.select("INGESTION_DATE").distinct().collect()]
+
+    (df.write
+       .format("delta")
+       .mode("overwrite")
+       .partitionBy("INGESTION_DATE")
+       .option("partitionOverwriteMode", "dynamic")
+       .option("mergeSchema", "true")
+       .saveAsTable(f"{SILVER_SCHEMA}.{hist_tbl}"))
+
+    count = get_row_count(SILVER_SCHEMA, hist_tbl)
+    print(f"    ✓ HIST → {SILVER_SCHEMA}.{hist_tbl:<48} {count:>10,} rows  [PARTITION: {dates_in_batch}]")
+    return count
 
 print("✅ Helper functions defined")
 
@@ -181,6 +202,29 @@ succeeded = sum(1 for r in results if r["status"] == "SUCCESS")
 print(f"\n{len(results)} tables | ✅ {succeeded} succeeded | ❌ {len(results)-succeeded} failed")
 
 
+# ============================================================
+# CELL 6 — VALIDATION
+# ============================================================
+print("PARTITION VALIDATION — INGESTION_DATE ranges in hist tables\n")
+print(f"{'HIST TABLE':<50} {'MIN DATE':<15} {'MAX DATE':<15} {'PARTITIONS':>10}")
+print("-" * 95)
+
+for bronze_tbl in TABLE_REGISTRY:
+    hist_tbl = bronze_tbl.replace("bronze_", "hist_")
+    try:
+        stats = (spark.table(f"{SILVER_SCHEMA}.{hist_tbl}")
+                      .agg(
+                          F.min("INGESTION_DATE").alias("min_dt"),
+                          F.max("INGESTION_DATE").alias("max_dt"),
+                          F.countDistinct("INGESTION_DATE").alias("partitions")
+                      ).collect()[0])
+
+        print(f"{SILVER_SCHEMA+'.'+hist_tbl:<50} "
+              f"{str(stats['min_dt']):<15} "
+              f"{str(stats['max_dt']):<15} "
+              f"{stats['partitions']:>10}")
+    except Exception as e:
+        print(f"{SILVER_SCHEMA+'.'+hist_tbl:<50} ERROR: {e}")
 
 
 

@@ -1,0 +1,187 @@
+# ============================================================
+# CELL 1 — IMPORTS & CONFIG
+# ============================================================
+from pyspark.sql import functions as F
+from pyspark.sql.utils import AnalysisException
+from delta.tables import DeltaTable
+from notebookutils import mssparkutils
+from datetime import datetime
+
+LAKEHOUSE_NAME = "aflh_GOLD_DEH_FILEGEN_PIQ_SRC_DATA"
+BRONZE_SCHEMA  = "dbo"
+SILVER_SCHEMA  = "silver"
+
+TABLE_REGISTRY = [
+    "bronze_ea_mrd_ts_amm_device_location_moms",
+    "bronze_ea_mrd_vd_inservice_meters",
+    "bronze_ea_pmd_ms_dxfeeders_psdb",
+    "bronze_ea_pmd_ms_station_all_psdb",
+    "bronze_ea_pmd_ms_transformer_gis",
+    "bronze_ea_pmd_ms_transformer_psdb",
+    "bronze_ea_pmd_ms_trsta_psdb",
+]
+
+print("✅ Config loaded")
+print(f"   Lakehouse : {LAKEHOUSE_NAME}")
+print(f"   Bronze    : {BRONZE_SCHEMA}")
+print(f"   Silver    : {SILVER_SCHEMA}")
+print(f"   Tables    : {len(TABLE_REGISTRY)}")
+
+# ============================================================
+# CELL 2 — CREATE SILVER SCHEMA (run once)
+# ============================================================
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SILVER_SCHEMA}")
+
+schemas = [r.databaseName for r in spark.catalog.listDatabases()]
+assert SILVER_SCHEMA in schemas, f"❌ Schema '{SILVER_SCHEMA}' not created!"
+print(f"✅ Schema '{SILVER_SCHEMA}' ready")
+print(f"   All schemas: {schemas}")
+
+
+# ============================================================
+# CELL 3 — HELPER FUNCTIONS
+# ============================================================
+
+def table_exists(schema, table):
+    try:
+        spark.table(f"{schema}.{table}")
+        return True
+    except AnalysisException:
+        return False
+
+
+def get_row_count(schema, table):
+    return spark.table(f"{schema}.{table}").count()
+
+
+def validate_ingestion_date(df, bronze_tbl):
+    """Ensure INGESTION_DATE exists and is not null."""
+    if "INGESTION_DATE" not in df.columns:
+        raise ValueError(f"❌ INGESTION_DATE column missing in {bronze_tbl}")
+    null_count = df.filter(F.col("INGESTION_DATE").isNull()).count()
+    if null_count > 0:
+        raise ValueError(f"❌ {null_count} NULL INGESTION_DATE rows in {bronze_tbl}")
+
+
+def write_src_overwrite(bronze_tbl, src_tbl):
+    """
+    SRC layer — full overwrite every run.
+    Always reflects latest bronze snapshot.
+    No partitioning needed — this is current state only.
+    """
+    df = (spark.table(f"{BRONZE_SCHEMA}.{bronze_tbl}")
+               .withColumn("SILVER_LOAD_TS", F.current_timestamp()))
+
+    validate_ingestion_date(df, bronze_tbl)
+
+    (df.write
+       .format("delta")
+       .mode("overwrite")
+       .option("overwriteSchema", "true")
+       .saveAsTable(f"{SILVER_SCHEMA}.{src_tbl}"))
+
+    count = get_row_count(SILVER_SCHEMA, src_tbl)
+    print(f"    ✓ SRC  → {SILVER_SCHEMA}.{src_tbl:<48} {count:>10,} rows  [OVERWRITE]")
+    return count
+
+
+def write_hist_partition(bronze_tbl, hist_tbl):
+    """
+    HIST layer — partitioned by INGESTION_DATE.
+    - First run   : creates table with partitions
+    - Re-run      : overwrites only that date's partition (idempotent)
+    - New date    : adds new partition automatically
+    
+    INGESTION_DATE stays as a normal column AND is the partition key.
+    No new column is added.
+    """
+    df = (spark.table(f"{BRONZE_SCHEMA}.{bronze_tbl}")
+               .withColumn("SILVER_LOAD_TS", F.current_timestamp()))
+
+    validate_ingestion_date(df, bronze_tbl)
+
+    # Get the date(s) being loaded for logging
+    dates_in_batch = [r[0] for r in df.select("INGESTION_DATE").distinct().collect()]
+
+    (df.write
+       .format("delta")
+       .mode("overwrite")
+       .partitionBy("INGESTION_DATE")
+       .option("partitionOverwriteMode", "dynamic")  # only touch partitions in this batch
+       .option("mergeSchema", "true")                # handle schema evolution safely
+       .saveAsTable(f"{SILVER_SCHEMA}.{hist_tbl}"))
+
+    count = get_row_count(SILVER_SCHEMA, hist_tbl)
+    print(f"    ✓ HIST → {SILVER_SCHEMA}.{hist_tbl:<48} {count:>10,} rows  [PARTITION: {dates_in_batch}]")
+    return count
+
+
+print("✅ Helper functions defined")
+
+# ============================================================
+# CELL 4 — MAIN PIPELINE
+# ============================================================
+run_start = datetime.now()
+results   = []
+
+print(f"{'='*65}")
+print(f"  SILVER LOAD STARTED : {run_start.strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"  Lakehouse           : {LAKEHOUSE_NAME}")
+print(f"{'='*65}\n")
+
+for bronze_tbl in TABLE_REGISTRY:
+
+    src_tbl  = bronze_tbl.replace("bronze_", "src_")
+    hist_tbl = bronze_tbl.replace("bronze_", "hist_")
+
+    print(f"▶ {BRONZE_SCHEMA}.{bronze_tbl}")
+
+    try:
+        src_count  = write_src_overwrite(bronze_tbl, src_tbl)
+        hist_count = write_hist_partition(bronze_tbl, hist_tbl)
+
+        results.append({
+            "bronze" : bronze_tbl,
+            "src"    : src_tbl,
+            "hist"   : hist_tbl,
+            "src_rows"  : src_count,
+            "hist_rows" : hist_count,
+            "status" : "SUCCESS"
+        })
+
+    except Exception as e:
+        print(f"    ❌ FAILED: {e}")
+        results.append({
+            "bronze" : bronze_tbl,
+            "src"    : bronze_tbl.replace("bronze_", "src_"),
+            "hist"   : bronze_tbl.replace("bronze_", "hist_"),
+            "src_rows"  : 0,
+            "hist_rows" : 0,
+            "status" : f"FAILED: {str(e)[:80]}"
+        })
+
+run_end = datetime.now()
+elapsed = (run_end - run_start).total_seconds()
+
+print(f"\n{'='*65}")
+print(f"  COMPLETE : {run_end.strftime('%Y-%m-%d %H:%M:%S')}  ({elapsed:.1f}s)")
+print(f"{'='*65}")
+
+# ============================================================
+# CELL 5 — SUMMARY
+# ============================================================
+print(f"\n{'BRONZE TABLE':<48} {'SRC':>10} {'HIST':>10}  STATUS")
+print("-" * 80)
+
+for r in results:
+    icon = "✅" if r["status"] == "SUCCESS" else "❌"
+    print(f"{r['bronze']:<48} {r['src_rows']:>10,} {r['hist_rows']:>10,}  {icon}")
+
+succeeded = sum(1 for r in results if r["status"] == "SUCCESS")
+print(f"\n{len(results)} tables | ✅ {succeeded} succeeded | ❌ {len(results)-succeeded} failed")
+
+
+
+
+
+

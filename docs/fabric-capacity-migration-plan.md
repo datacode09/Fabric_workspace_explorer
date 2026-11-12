@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document type** | Migration runbook |
-| **Version** | 2.0 |
+| **Version** | 2.1 (adds the period where both stacks run and the wave-by-wave cutover) |
 | **Status** | Draft – for review |
 | **Last updated** | 2026-11-12 |
 | **Owner** | Data Services (Enterprise Technology) |
@@ -19,13 +19,14 @@
 3. [Assumptions and constraints](#3-assumptions-and-constraints)
 4. [Roles and responsibilities](#4-roles-and-responsibilities)
 5. [Guiding principles](#5-guiding-principles)
+5a. [Running both stacks side by side](#5a-running-both-stacks-side-by-side)
 6. [Phase overview](#6-phase-overview)
 7. [Phase 0 – Readiness and baseline](#phase-0--readiness-and-baseline)
 8. [Phase 1 – Build and validate on capacity B](#phase-1--build-and-validate-on-capacity-b)
 9. [Phase 2 – Merge into the non-prod lanes on capacity A](#phase-2--merge-into-the-non-prod-lanes-on-capacity-a)
 10. [Phase 3 – Run the new gold in prod without consumers](#phase-3--run-the-new-gold-in-prod-without-consumers)
-11. [Phase 4 – Promote the semantic models and rebind the reports](#phase-4--promote-the-semantic-models-and-rebind-the-reports)
-12. [Phase 5 – Cutover and hypercare](#phase-5--cutover-and-hypercare)
+11. [Phase 4 – Promote the semantic models and rebind the reports (per wave)](#phase-4--promote-the-semantic-models-and-rebind-the-reports-per-wave)
+12. [Phase 5 – Cutover and hypercare (per wave)](#phase-5--cutover-and-hypercare-per-wave)
 13. [Phase 6 – Retire the old items and close out](#phase-6--retire-the-old-items-and-close-out)
 14. [Go/No-Go checklist](#14-gono-go-checklist)
 15. [Rollback plan](#15-rollback-plan)
@@ -47,8 +48,9 @@
 - New silver-to-gold notebooks and the **new gold lakehouse**
 - Changes to the elt orchestration pipeline
 - New semantic models for business groups 1 and 2
-- **Rebinding the existing prod reports** to the new semantic models
-- Retiring the old gold items and old semantic models
+- **Rebinding the existing prod reports** to the new semantic models, **in waves**
+- Running the old and new stacks side by side until every report has moved
+- Retiring the old gold items and old semantic models once the **last** wave is done
 
 **Out of scope**
 
@@ -75,7 +77,20 @@
 
 **Capacity B** is a **development area only**. Slalom works in **`trans-dev-2`** on B, reading data from A, and is building a new gold layer and new semantic models for the existing prod reports.
 
-### 2.2 Target state
+### 2.2 Interim state: both stacks running side by side
+
+The new gold layer and new semantic models **won't serve every report at first**. Until the last wave is done, both stacks run in prod on A:
+
+| | **Old stack** | **New stack** |
+|---|---|---|
+| Gold | Old gold lakehouse + old notebooks (still running) | New gold lakehouse + new notebooks |
+| Semantic models | Old models (still refreshing) | New models |
+| Reports | Reports not yet moved | Reports moved in completed waves |
+| Orchestration | Old path in elt (on) | New path in elt (on) |
+
+Both stacks read the same **prod silver**. They are run, monitored and rolled back **per wave** (see §5a). While both run, A carries the cost of both, so the CU budget in §5a.4 applies.
+
+### 2.3 Target state
 
 **Every workspace stays on capacity A.** The workspace layout and the deployment pipelines don't change. What changes is the content inside them:
 
@@ -130,7 +145,73 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 5. **Every phase has a gate.** No phase starts until the previous phase's exit criteria are met and recorded.
 6. **Every step can be reversed.** Each phase lists its fallback. The rollback in §15 is **rehearsed in test** before cutover.
 7. **No hard-coded environment values.** Workspace, lakehouse and notebook IDs and paths come from variable libraries or deployment rules.
-8. **Never run both versions on A for longer than planned.** Old gold and old model refreshes are turned off at cutover.
+8. **Running both stacks has an end date.** Both run only as long as needed, against a planned end date and a CU budget (§5a). Each old item is retired **as soon as nothing depends on it**, not all at once at the end.
+9. **The two stacks must agree.** While both run, a KPI shown in an old-stack report and in a new-stack report must give the same number, or the difference must be documented and explained to users.
+
+## 5a. Running both stacks side by side
+
+### 5a.1 Wave plan
+
+Every in-scope prod report is assigned to a **wave** in the Phase 0 report inventory (step 0.4). Recommended order:
+
+| Wave | Content | Purpose |
+|---|---|---|
+| **Wave 1 (pilot)** | 1–3 reports with low risk but real use, ideally one per business group | Prove the end-to-end path, the rebind, the rollback and the cost of running both stacks in prod |
+| **Wave 2..n** | Groups of reports by **subject area / semantic model**, highest CU savings first | Bring the CU reduction as early as possible |
+| **Final wave** | The rest, including reports that need replacing (F1-c) | Lets the old stack be retired completely |
+
+Rules:
+
+- A report moves **as a whole**. It is either on the old model or the new one, never split.
+- Reports that share a model, a workspace app or a shared dataset with Excel users move **together** where possible.
+- Each wave repeats **Phase 4 → Phase 5**, with its own Go/No-Go, hypercare and rollback. Phases 0–3 run once; later waves only need Phase 1–2 again if they bring new gold tables or model changes.
+
+### 5a.2 Dependency map
+
+Keep a **dependency map** (in the repo next to the inventory) and update it at the end of every wave:
+
+| Old item | Used by (old models / reports) | Replaced by (new item) | Wave in which it becomes unused | Retired? |
+|---|---|---|---|---|
+| old_gold.fact_x | old_model_bg1 → reports R1, R2 | new_gold.fact_x / new_model_bg1 | Wave 2 | ☐ |
+
+An old item can be retired **only when its "Used by" column is empty** (checked with the lineage view and the report inventory). This means old notebooks, gold tables and models are retired **gradually**, not only at the end.
+
+### 5a.3 Orchestration while both stacks run
+
+- In elt, keep the old and new paths as **separate branches** of the orchestration, each with its own on/off flag by **subject area** (e.g. variable-library values `run_old_<area>`, `run_new_<area>`), instead of one global `gold_version` switch.
+- Both paths depend on **silver being finished**; neither depends on the other. A failure in one path **must not stop the other** (set the activity dependencies to "on completion" or use separate child pipelines, as appropriate).
+- Schedule the **heavier path first** in the off-peak window, or spread the two paths out, so their CU peaks don't land on top of each other.
+- Alerts are set up for **both** paths, with the owning stack shown in the alert name.
+
+### 5a.4 CU budget while both stacks run
+
+- Before Wave 1, measure the **combined** CU of both stacks (Phase 3 side-by-side run) and set a **budget**: a ceiling on A's peak and average use, below the throttling threshold.
+- Track it **weekly** in the Capacity Metrics app. If the budget is exceeded:
+  1. Move to the next wave sooner (to retire old items sooner), **or**
+  2. Lower refresh frequency on the old models whose reports move in the next wave, **or**
+  3. **Converge:** where a new gold table can stand in for an old one (same grain, same business logic, field names matched), point the old model at the new gold table and **retire the old notebook early** (see 5a.5), **or**
+  4. Escalate to the approvers for a temporary capacity scale-up for the rest of the period.
+
+### 5a.5 Pointing old models at new gold (optional)
+
+To cut duplicate compute, an **old** model can be pointed at a **new** gold table **before** its reports move, as long as all of these are true:
+
+- The new table has the **same grain and business logic**, and reconciliation (Appendix A.1) passed with exact match
+- The column names the old model needs exist (directly or through a view or shortcut set up to match)
+- The change is deployed through the normal pipeline (dev → test → prod) and the old model's reports are checked
+
+This is optional. Use it only where the CU budget needs it, because it adds one more change to keep track of.
+
+### 5a.6 Keeping the numbers the same across both stacks
+
+- Keep a **KPI cross-check list**: KPIs that show up in both old-stack and new-stack reports. After every load, run an automated check that the old and new numbers match, or report the difference (Appendix A.1 run against model-level KPIs, or a DAX query against both models).
+- **Mark which model to use:** mark new models as **Promoted** (later **Certified**) once their wave is done; add "(legacy)" to the description of old models that are being retired, and don't allow new reports to be built on them.
+- If an **intended correction** in the new stack changes a KPI (logged in Phase 1.4), tell users of **both** stacks before the wave goes live, so the difference isn't reported as a defect.
+
+### 5a.7 Planned end date
+
+- The approvers set an **end date** for running both stacks (decision D-7).
+- If it slips by more than one wave, Data Services escalates with a revised plan and CU forecast.
 
 ## 6. Phase overview
 
@@ -140,9 +221,10 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 | 1 | Build and validate on B | B | Reconciliation passed; CU cost of new models ≤ old; field comparison clean |
 | 2 | Merge into non-prod lanes on A | A (non-prod) | Merged; parameters set; smoke test and UAT passed in test |
 | 3 | Run the new gold in prod without consumers | A (prod) | New gold built in prod; reconciles against old gold |
-| 4 | Promote semantic models and rebind reports | A (prod) | New models refreshed; reports rebound and visually checked |
-| 5 | Cutover and hypercare | A (prod) | Old pipelines off; hypercare period passed with no Sev-1/Sev-2 issues |
-| 6 | Retire old items and close out | A, B | Old items deleted; environments in sync; decision on B recorded |
+| 4 | Promote semantic models and rebind reports — **per wave** | A (prod) | The wave's reports rebound and visually checked |
+| 5 | Cutover and hypercare — **per wave** | A (prod) | Hypercare passed for the wave; newly unused old items retired |
+| ↻ | **Repeat 4–5 for each wave** (and 1–2 again if a wave brings new gold or model changes) | | Both stacks running, within the CU budget |
+| 6 | Retire the rest of the old items and close out — **after the final wave** | A, B | Old stack fully retired; environments in sync; decision on B recorded |
 
 ---
 
@@ -162,7 +244,9 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 | 0.1 | Check assumptions A1–A9 (§3) and record each as passed or failed | Data Services | Completed §3 table |
 | 0.2 | **Record the CU baseline** for A: 14-day peak, average, and throttling events, broken down by item (models, notebooks, pipelines) from the Capacity Metrics app | Platform admin | Metrics export |
 | 0.3 | **Record the data baseline:** row counts, key totals and distinct key counts for every gold table in scope (Appendix A.1) | BI team | Baseline file in the repo |
-| 0.4 | **Record the report inventory:** every prod report bound to the old models, with workspace, report ID, model ID, app membership, subscriptions, and Excel/Analyze-in-Excel use | BI team | Inventory sheet |
+| 0.4 | **Record the report inventory:** every prod report bound to the old models, with workspace, report ID, model ID, app membership, subscriptions, Excel/Analyze-in-Excel use, and **its assigned wave** (§5a.1) | BI team | Inventory sheet with wave plan |
+| 0.4a | Build the **dependency map** (§5a.2) from old gold tables → old models → reports, using the lineage view | BI team | Dependency map in the repo |
+| 0.4b | Build the **KPI cross-check list** (§5a.6) of KPIs that will appear in both stacks | BI team + business | KPI list |
 | 0.5 | **Record the schema of the old models:** tables, columns, measures, relationships and roles (RLS) | BI team | Model schema export (Appendix A.2) |
 | 0.6 | **Back up the old models** (export the definitions to Git/PBIP; for Import models also take an XMLA/.abf backup if allowed) | BI team | Backup location recorded |
 | 0.7 | Connect the existing non-prod workspaces on A to Git (if not already) and **commit the baseline** | BI team | Baseline commit hash |
@@ -243,13 +327,13 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 | 2.3 | Merge and **sync each dev workspace on A from Git**. Confirm item counts and names match what's expected | BI team | Sync log; item list |
 | 2.4 | Set up the **variable library** (or pipeline parameters) for each stage: workspace IDs, lakehouse IDs, notebook IDs used by elt, silver source, new-gold target | BI team | Variable library values for each stage |
 | 2.5 | Set **deployment rules**: notebook default lakehouse for each stage; semantic model data source/parameters pointing at that stage's new-gold | BI team | Rule screenshots |
-| 2.6 | In **elt-dev**, add the new notebook activities to the orchestration. **Keep** the old activities for now; control which path runs with a pipeline parameter or variable (e.g. `gold_version = old \| new \| both`) | BI team | Pipeline definition |
+| 2.6 | In **elt-dev**, add the new notebook activities as a **separate branch** of the orchestration. **Keep** the old branch. Control each with on/off flags **by subject area** (`run_old_<area>`, `run_new_<area>`) from the variable library. A failure in one branch must not stop the other (§5a.3) | BI team | Pipeline definition |
 | 2.7 | Rebind the **dev copies** of the existing reports to the new models (Appendix A.3) | BI team | Rebind log |
 | 2.8 | Deploy **dev → test** in this order: **transf → elt → cons** | BI team | Deployment history |
 | 2.9 | **Check references after deploying:** open the test lakehouse shortcuts, the notebook default lakehouses, the elt notebook activities and the model data source; each must point at **test** items (A5) | BI team | Checklist with screenshots |
-| 2.10 | **Smoke test in test** at **off-peak** hours: one full orchestration run with `gold_version = new`, a light reconciliation (row counts only), and one model refresh | BI team | Run results |
+| 2.10 | **Smoke test in test** at **off-peak** hours: one full orchestration run with **both branches on**, a light reconciliation (row counts only), and a refresh of both an old and a new model. Also test that a forced failure in one branch leaves the other branch running | BI team | Run results |
 | 2.11 | **UAT in test** by each business group, using the agreed UAT script (key reports, key numbers, RLS spot-checks with test users) | Business owners | UAT sign-off |
-| 2.12 | **Rehearse the rollback** (§15) in test: rebind to the old model, switch `gold_version = old`, confirm the reports work, then return to new | BI team | Rehearsal log with timings |
+| 2.12 | **Rehearse the wave rollback** (§15) in test: rebind the Wave 1 reports to the old model, confirm they work, then rebind them back to new | BI team | Rehearsal log with timings |
 
 **Exit criteria (gate G2)**
 
@@ -280,117 +364,128 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
-| 3.1 | Deploy **test → prod**: **transf**, then **elt**, with prod `gold_version = old` (the new path is deployed but not running) | BI team | Deployment history |
+| 3.1 | Deploy **test → prod**: **transf**, then **elt**, with every `run_new_<area>` flag **off** (the new branch is deployed but not running) | BI team | Deployment history |
 | 3.2 | **Check references after deploying** (as in 2.9): prod notebooks read **prod silver** and write to **prod new-gold**; elt activities point at **prod** notebooks | BI team | Checklist with screenshots |
 | 3.3 | Note: the new gold lakehouse is **empty after deployment** (definitions only, no data). Run the **initial load or backfill** of new gold off-peak | BI team | Run log; duration; CU used |
-| 3.4 | Switch prod to `gold_version = both` for **1–2 cycles** at most. Watch CU on A throughout | BI team + platform admin | Metrics screenshots |
-| 3.5 | **Reconcile prod new-gold against prod old-gold** (Appendix A.1) | BI team | Reconciliation report |
+| 3.4 | Turn on the `run_new_<area>` flags for the Wave 1 subject areas. **From here on, both branches run in prod** (§2.2). Watch CU on A for at least 2 cycles | BI team + platform admin | Metrics screenshots |
+| 3.5 | **Reconcile prod new-gold against prod old-gold** (Appendix A.1) and run the KPI cross-check (§5a.6) | BI team | Reconciliation report |
+| 3.6 | **Set the CU budget** for running both stacks (§5a.4) from the measured combined CU, and get it approved | Platform admin + Data Services | Approved budget |
 
 **Exit criteria (gate G3)**
 
-- [ ] New gold built in prod; reconciliation passes within tolerance (§18)
-- [ ] CU on A during the side-by-side run stayed below the throttling threshold
+- [ ] New gold built in prod; reconciliation and KPI cross-check pass within tolerance (§18)
+- [ ] CU on A with both stacks running stayed below the throttling threshold; CU budget approved
 - [ ] No consumer reads from new gold yet
 
 **Fallback**
 
-- **F3-a (deploy or reference error):** Set `gold_version = old`. Nothing in prod reads new gold, so **users are unaffected**. Fix in dev and redeploy.
-- **F3-b (CU pressure during the side-by-side run):** Stop the side-by-side run (`gold_version = old`). Rerun the new path only in the next off-peak window, or go straight from the initial-load reconciliation to Phase 4 if the B and test evidence is strong. The approvers decide.
+- **F3-a (deploy or reference error):** Turn the `run_new_<area>` flags off. Nothing in prod reads new gold, so **users are unaffected**. Fix in dev and redeploy.
+- **F3-b (combined CU too high):** Reschedule the branches so their peaks don't overlap (§5a.3). If it's still too high, take the options in §5a.4 to the approvers **before** Wave 1: a smaller first wave, lower old-model refresh frequency, pointing old models at new gold (§5a.5), or a temporary scale-up.
 - **F3-c (reconciliation fails in prod but passed on B):** Look first for environment differences: silver source, shortcut targets, parameters. Stay in Phase 3 until it's resolved.
 
 ---
 
-## Phase 4 – Promote the semantic models and rebind the reports
+## Phase 4 – Promote the semantic models and rebind the reports (per wave)
 
-**Objective.** Put the new semantic models in prod and move the **existing** reports onto them without changing report identity.
+**Objective.** For **the current wave only**, put the new semantic models in prod (first wave) or extend them (later waves), and move **that wave's** existing reports onto them without changing report identity. Reports in later waves stay on the old models.
 
 **Entry criteria**
 
-- Gate G3 passed
-- **Final Go/No-Go (§14) approved**
-- Cutover communication sent (§17)
+- Gate G3 passed (first wave) or gate G5 of the previous wave passed (later waves)
+- If the wave brings new gold tables or model changes: Phases 1–2 repeated for that scope
+- **Go/No-Go for the wave (§14) approved**
+- Wave communication sent (§17)
 
 **Steps (recommended path: rebind in dev, deploy together)**
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
-| 4.1 | Confirm the cons-test stage holds the new models and the **rebound** reports (from 2.7/2.8) | BI team | Item list |
-| 4.2 | Deploy **cons-bg1 test → prod** with the **semantic model and its reports selected together**. The pipeline binds the prod reports to the prod copy of the new model. Report IDs stay the same | BI team | Deployment history |
+| 4.1 | Confirm the cons-test stage holds the new models and **only this wave's** reports rebound (from 2.7/2.8). Reports in later waves must still be bound to the **old** model in test | BI team | Item list with each report's binding |
+| 4.2 | Deploy **cons-bg1 test → prod**, selecting **only** the new semantic model and **this wave's** reports. The pipeline binds those prod reports to the prod copy of the new model. Report IDs stay the same. **Don't select reports from later waves** | BI team | Deployment history; list of selected items |
 | 4.3 | Check the deployment rule: the prod model points at **prod new-gold** | BI team | Screenshot |
 | 4.4 | **Refresh (or reframe) the new prod model**; confirm it succeeds and record how long it takes | BI team | Refresh history |
-| 4.5 | **Check each rebound report:** open every page, compare key numbers with the baseline (0.3), test RLS with test users | BI team + business | Check log |
-| 4.6 | Repeat 4.2–4.5 for **cons-bg2** | BI team | As above |
-| 4.7 | For any reports marked for **replacement** (F1-c): publish the replacement, update the **workspace app**, move subscriptions | BI team | App version; subscription list |
-| 4.8 | Repoint **Excel / Analyze-in-Excel** connections and other models connected to the old model (from inventory 0.4); tell the owners | BI team | Owner confirmations |
+| 4.5 | **Check each rebound report:** open every page, compare key numbers with the baseline (0.3) **and with the matching old-stack reports** (KPI cross-check, §5a.6), test RLS with test users | BI team + business | Check log |
+| 4.6 | Check that **reports not in this wave are still bound to the old models** and working | BI team | Binding check (Appendix A.3, list bindings) |
+| 4.7 | Repeat 4.2–4.6 for **cons-bg2** if this wave includes its reports | BI team | As above |
+| 4.8 | For any reports in this wave marked for **replacement** (F1-c): publish the replacement, update the **workspace app**, move subscriptions | BI team | App version; subscription list |
+| 4.9 | Repoint **Excel / Analyze-in-Excel** connections that belong to this wave (inventory 0.4); tell the owners | BI team | Owner confirmations |
+| 4.10 | Mark the new model **Promoted** once the first wave is live; update the old model's description to show which reports are still on it | BI team | Endorsement setting |
 
-**Exit criteria (gate G4)**
+**Exit criteria (gate G4, per wave)**
 
-- [ ] New models refreshed in prod; all inventoried reports bound to the new models (or replaced, per F1-c)
-- [ ] Every report page renders; key numbers match within tolerance; RLS checked
-- [ ] Excel and other connected consumers repointed or their owners told
+- [ ] This wave's reports bound to the new models (or replaced, per F1-c); **all other reports still on the old models and working**
+- [ ] Every page of every report in the wave renders; key numbers match within tolerance in both stacks; RLS checked
+- [ ] Excel and other connected consumers in this wave repointed, or their owners told
 
 **Fallback**
 
 - **F4-a (pipeline didn't rebind the prod report):** Rebind directly in prod with the **Rebind Report In Group** REST API or `sempy_labs.report.report_rebind` (Appendix A.3). Then make the same change in dev so dev and prod stay in step.
-- **F4-b (a report can't be rebound cleanly):** Publish the replacement report, update the workspace app, move subscriptions, and tell its users. Keep the old report (bound to the old model) hidden from the app for the rollback period.
-- **F4-c (new model refresh fails in prod):** Rebind the affected reports back to the old model (§15, steps R1–R3). Old models are still refreshing during Phase 4, so users still see current data.
+- **F4-b (a report can't be rebound cleanly):** Move it to a **later wave** and leave it on the old model, or publish a replacement report, update the workspace app, move subscriptions, and tell its users.
+- **F4-c (new model refresh fails in prod):** Rebind **this wave's** reports back to the old model (§15.2). The old models keep refreshing the whole time both stacks run, so users still see current data.
+- **F4-d (a report from a later wave was rebound by mistake):** Rebind it back to the old model right away (Appendix A.3) and correct the selection in test before the next deploy.
 
 ---
 
-## Phase 5 – Cutover and hypercare
+## Phase 5 – Cutover and hypercare (per wave)
 
-**Objective.** Make the new path the only one running on A, and watch it closely through a defined hypercare period.
+**Objective.** Watch the wave closely through hypercare, then **retire only the old items that nothing uses any more** (§5a.2). The old stack keeps serving the reports that haven't moved yet.
 
 **Entry criteria**
 
-- Gate G4 passed
+- Gate G4 for this wave passed
 
 **Steps**
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
-| 5.1 | Switch prod to `gold_version = new` (old gold notebooks stop running) | BI team | Pipeline parameter value |
-| 5.2 | **Pause scheduled refresh on the old semantic models.** Don't delete them | BI team | Refresh settings |
-| 5.3 | Turn on **surge protection** on A, if not already on | Platform admin | Capacity settings |
-| 5.4 | **Hypercare** – at least **one full reporting cycle** (including a month-end if possible): check daily that the pipeline succeeds, refreshes succeed, CU stays healthy, and no business incidents come in | BI team | Daily hypercare log |
-| 5.5 | Compare CU on A with the baseline (0.2) at the end of hypercare | Platform admin | Before/after report |
-| 5.6 | Business owners confirm the cutover worked | Business owners | Written sign-off |
+| 5.1 | Turn on **surge protection** on A (first wave), if not already on | Platform admin | Capacity settings |
+| 5.2 | **Hypercare for the wave** – at least **one full reporting cycle** (including a month-end if possible): check daily that **both** orchestration branches succeed, old and new model refreshes succeed, the KPI cross-check passes, CU stays within the budget (§5a.4), and no business incidents come in | BI team | Daily hypercare log |
+| 5.3 | **Update the dependency map** (§5a.2): mark the old models, gold tables and notebooks that **nothing uses any more** after this wave | BI team | Updated map |
+| 5.4 | For the newly unused old items: **pause refresh** on old models with no remaining reports, and turn off `run_old_<area>` for old gold areas with no remaining users. **Disable, don't delete**, for the rest of the rollback period | BI team | Refresh settings; flag values |
+| 5.5 | Compare CU on A with the baseline (0.2) and the CU budget at the end of hypercare | Platform admin | Before/after report |
+| 5.6 | Business owners confirm the wave worked | Business owners | Written sign-off |
+| 5.7 | Plan the next wave: confirm its scope, dates and Go/No-Go; check the planned end date (§5a.7) | Data Services | Updated wave plan |
 
-**Exit criteria (gate G5)**
+**Exit criteria (gate G5, per wave)**
 
 - [ ] Hypercare complete with **no open Sev-1 or Sev-2** incidents
-- [ ] CU on A at or below the target (§18)
+- [ ] CU on A within the budget for running both stacks (or at or below the final target after the last wave, §18)
+- [ ] Dependency map updated; newly unused old items disabled
 - [ ] Business sign-off received
 
 **Fallback**
 
-- **F5-a:** Any rollback trigger in §15.1 → run the **rollback** (§15.2).
+- **F5-a:** Any rollback trigger in §15.1 → run the **wave rollback** (§15.2). Earlier waves that are stable stay on the new stack.
+- **F5-b (CU budget exceeded):** Apply §5a.4.
+
+**→ Repeat Phases 4–5 for each wave. Once the final wave passes G5, go to Phase 6.**
 
 ---
 
 ## Phase 6 – Retire the old items and close out
 
-**Objective.** Remove the old items, bring dev, test and prod back in step, and decide what happens to capacity B.
+**Objective.** After the **final wave**, remove what is left of the old stack, bring dev, test and prod back in step, and decide what happens to capacity B. (Old items that became unused in earlier waves can be deleted at the end of each wave's rollback period through the same steps 6.1–6.3, using the dependency map.)
 
 **Entry criteria**
 
-- Gate G5 passed (the rollback option ends here; record this in the decision log)
+- Gate G5 passed for the **final wave**. Every report in the inventory is on the new stack, and the dependency map shows nothing using the old items (the rollback option ends here; record this in the decision log)
 
 **Steps**
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
 | 6.1 | Take a final backup of the old model definitions and an export of the old gold table schemas | BI team | Backup location |
-| 6.2 | In **dev**: remove the old notebook activities and the `gold_version` switch from elt; delete the old gold notebooks, old gold lakehouse and old models. Commit through a pull request | BI team | Pull request link |
+| 6.2 | In **dev**: remove the old orchestration branch and the `run_old_<area>` / `run_new_<area>` flags from elt; delete the old gold notebooks, old gold lakehouse and old models. Commit through a pull request | BI team | Pull request link |
 | 6.3 | Deploy dev → test → prod so the deletions reach every stage. Confirm the prod item inventory | BI team | Deployment history; inventory |
-| 6.4 | Check that **no prod or non-prod item on A references B** | BI team | Lineage view check |
+| 6.4 | Check that **no prod or non-prod item on A references B**, and that nothing references the old gold or old models | BI team | Lineage view check |
+| 6.4a | Mark the new models **Certified** (if your governance process allows it); retire the KPI cross-check | BI team | Endorsement setting |
 | 6.5 | **Decide B's future:** keep it for future development, scale it down, or pause it between engagements. A paused capacity still pays for stored data, so clean up `trans-dev-2` if it's no longer needed | Data Services + platform admin | Decision log entry |
 | 6.6 | Update architecture documentation and this runbook's status to **Complete** | Data Services | Updated docs |
 | 6.7 | Lessons-learned review with Slalom and the BI team | Data Services | Notes |
 
 **Exit criteria (gate G6)**
 
-- [ ] Old items removed in every stage; environments in sync
+- [ ] Old stack fully removed in every stage; environments in sync
 - [ ] Nothing on A depends on B
 - [ ] Decision on B recorded; documentation updated
 
@@ -398,11 +493,11 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 
 ## 14. Go/No-Go checklist
 
-Must be completed and signed **before Phase 4 (cutover)**. A single "No" means **No-Go**.
+Must be completed and signed **before each wave's Phase 4**. For later waves, criteria G-1 to G-3 apply to that wave's scope. A single "No" means **No-Go**.
 
 | # | Criterion | Yes/No | Evidence |
 |---|---|---|---|
-| G-1 | Gates G0–G3 all passed and recorded | | |
+| G-1 | Gates G0–G3 passed (first wave) or the previous wave's G5 passed (later waves) | | |
 | G-2 | Reconciliation passed on B (≥ 3 cycles), in test, and in prod | | |
 | G-3 | New models' CU cost ≤ old (Phase 1.8) | | |
 | G-4 | UAT signed off by BG1 and BG2 | | |
@@ -413,7 +508,9 @@ Must be completed and signed **before Phase 4 (cutover)**. A single "No" means *
 | G-9 | No conflicting change or freeze-breaking release in the window | | |
 | G-10 | Support people available for the cutover window and hypercare | | |
 | G-11 | Business communication sent (§17) | | |
-| G-12 | Capacity A has headroom for the window (Metrics app check on the day) | | |
+| G-12 | Capacity A has headroom for the window (Metrics app check on the day), and the CU budget for running both stacks is being met | | |
+| G-13 | This wave's report list is final; **reports from other waves have been checked to still be on the old model in test** | | |
+| G-14 | KPI cross-check passing; any intended differences explained to users of **both** stacks | | |
 
 **Decision:** Go / No-Go · **Decided by:** __________ · **Date/time:** __________
 
@@ -430,25 +527,28 @@ Run the rollback if **any** of these happen after cutover and can't be fixed wit
 - CU on A rises above the agreed threshold because of the new items, with throttling seen by users
 - The business owner withdraws sign-off
 
-### 15.2 Rollback procedure
+### 15.2 Rollback procedure (per wave)
 
-Available until the end of Phase 5. Rehearsed in step 2.12.
+The rollback covers **one wave at a time**. Earlier waves that are stable stay on the new stack. Rehearsed in step 2.12.
 
 | Step | Action | Notes |
 |---|---|---|
-| R1 | **Resume scheduled refresh on the old semantic models** and run one refresh now | Old models were paused, not deleted |
-| R2 | **Rebind the prod reports back to the old models** (Appendix A.3, with the old model IDs from inventory 0.4) | Report IDs and URLs stay the same |
-| R3 | For any **replaced** reports: restore the old report in the workspace app; move subscriptions back | |
-| R4 | Switch prod to `gold_version = old` (old gold notebooks run again) | If old gold missed cycles, run them now to catch up |
+| R1 | Confirm the old model for the affected reports is **refreshing and current**. If it was paused after an earlier wave (5.4), **resume refresh** and run one refresh now | While both stacks run, the old models normally keep refreshing |
+| R2 | If the old gold area behind that model was turned off (5.4), turn `run_old_<area>` back on and run the catch-up loads | Run missed cycles in order |
+| R3 | **Rebind this wave's prod reports back to the old models** (Appendix A.3, with the old model IDs from inventory 0.4) | Report IDs and URLs stay the same |
+| R4 | For any **replaced** reports in this wave: restore the old report in the workspace app; move subscriptions back | |
 | R5 | Check the key reports against the baseline numbers | |
 | R6 | Tell users the rollback is done (§17) | |
-| R7 | Root-cause analysis; fix in the feature branch; go back to the right phase (usually Phase 2) | |
+| R7 | Move the wave back in the wave plan; root-cause analysis; fix in the feature branch; go back to the right phase (usually Phase 2) | |
 
-**Time to complete a rollback:** use the time measured in the rehearsal (2.12). Fill it in here: ______ minutes.
+**Escalation – roll back every wave:** only if the defect is in something every wave shares (for example a new gold table used by all the new models, or an RLS defect in the new models). Run R1–R6 for every completed wave, starting with the most recent. The approvers decide.
+
+**Time to complete a wave rollback:** use the time measured in the rehearsal (2.12). Fill it in here: ______ minutes.
 
 ### 15.3 What rollback does *not* undo
 
-- The new gold lakehouse and new models stay in prod (unused). They're cleaned up later or reused on the next attempt.
+- The new gold lakehouse and new models stay in prod, still serving earlier waves. They're fixed and reused for the rolled-back wave on the next attempt.
+- Old items already **deleted** after an earlier wave's rollback period. Rollback for those waves needs the backups from 6.1, so delete old items only after their rollback period has ended.
 - Downstream copies or exports users made from the new models during the cutover window.
 
 ## 16. Risk register
@@ -466,7 +566,12 @@ Available until the end of Phase 5. Rehearsed in step 2.12.
 | R-09 | Excel / other consumers of the old model break silently | Medium | Medium | Inventory 0.4; owner outreach (4.8) | Keep the old model during hypercare; repoint |
 | R-10 | Someone changes the workspace directly in the UI instead of in Git | Medium | Medium | Branch protection; workspace access review; freeze | Resync from Git; review the change |
 | R-11 | Key people unavailable during cutover or hypercare | Low | Medium | Named backups (§17); calendar holds | Delay cutover (No-Go G-10) |
-| R-12 | Slalom engagement ends before hypercare | Medium | Medium | Handover pack and runbook walk-through before Phase 4 | Internal BI team owns hypercare |
+| R-12 | Slalom engagement ends before the final wave | Medium | Medium | Handover pack and runbook walk-through before Phase 4 | Internal BI team owns hypercare |
+| R-13 | **Running both stacks takes longer than planned**; A pays for both | Medium | High | Planned end date (§5a.7); waves ordered by CU savings; weekly CU budget review | §5a.4 options (point old models at new gold, lower refresh frequency, temporary scale-up) |
+| R-14 | **The same KPI shows different numbers** in old-stack and new-stack reports | Medium | High | KPI cross-check after every load (§5a.6); intended corrections told to users of both stacks | Hold the wave; fix or document the difference |
+| R-15 | **An old item is retired while something still uses it** | Low–Medium | High | Dependency map plus lineage check before every retirement (5.3); disable, don't delete | Turn the item back on (R1–R2) |
+| R-16 | A failure in one orchestration branch **stops the other** | Medium | High | Separate branches with independent dependencies (§5a.3); failure tested in 2.10 | Run the stalled branch by hand; fix the dependency |
+| R-17 | Developers build **new reports on the old models** while both stacks run | Medium | Medium | Mark old models "(legacy)" in their description; new models Promoted; review process for new reports | Add the report to a later wave |
 
 ## 17. Communication plan
 
@@ -474,9 +579,10 @@ Available until the end of Phase 5. Rehearsed in step 2.12.
 |---|---|---|---|---|
 | Runbook approved | BI team, platform admin, Slalom | Plan, roles, timeline | Meeting + this document | Data Services |
 | Non-prod freeze starts (Phase 2) | Developers on A | Freeze window, contacts | Team channel | BI team |
-| 5 business days before cutover | BG1, BG2 report users | What's changing (nothing visible except possible data corrections), cutover date, contacts | Email + app banner | Business owners |
+| 5 business days before **each wave** | Users of **that wave's** reports, plus users of old-stack reports that share KPIs with them | What's changing (nothing visible except possible data corrections), wave date, contacts | Email + app banner | Business owners |
+| Weekly while both stacks run | Approvers | Wave progress, CU against budget, KPI cross-check status, end-date forecast | Short status note | Data Services |
 | Go/No-Go | Approvers | Decision and evidence | Meeting; record in the decision log | Data Services |
-| Cutover start / end | BG1, BG2, support desk | Started / completed; how to report issues | Email / team channel | BI team |
+| Wave start / end | Affected users, support desk | Started / completed; how to report issues | Email / team channel | BI team |
 | Daily during hypercare | Approvers | Status (green/amber/red), incidents | Short status note | BI team |
 | Rollback (if needed) | Everyone above | Rollback started / done; next steps | Email / team channel | Data Services |
 | Close-out | Everyone above | Done; B decision; lessons learned | Email | Data Services |
@@ -495,9 +601,11 @@ Tolerances must be agreed with the business owners before Phase 1 ends. Defaults
 | Null rate per key column | Same or lower than old gold | B |
 | Report key numbers vs baseline | Exact match on the agreed KPI list | Test, prod |
 | Model refresh duration | ≤ old model's refresh duration | B, prod |
-| CU cost of models (refresh + query) | **≤ old**; target reduction agreed in §19 | B, prod (hypercare) |
+| CU cost of models (refresh + query) | **≤ old**; target reduction agreed in §19, measured **after the final wave** | B, prod |
 | Broken visuals | **Zero** on every page of every in-scope report | B, test, prod |
 | RLS test cases | **100% pass** | Test, prod |
+| KPI cross-check between the stacks | **Exact match**, or a documented intended difference | Prod, while both stacks run |
+| CU on A while both stacks run | Within the approved budget (D-8) | Prod, weekly |
 
 ## 19. Open decisions
 
@@ -509,6 +617,10 @@ Tolerances must be agreed with the business owners before Phase 1 ends. Defaults
 | D-4 | Fix-forward time limit before rollback | e.g. 2 h / 4 h / next business day | Data Services | Before G4 |
 | D-5 | Side-by-side run in prod: 1 or 2 cycles, or skip it (F3-b) | | Approvers | Before Phase 3 |
 | D-6 | Future of capacity B after close-out | Keep / scale down / pause / delete | Data Services + platform admin | Phase 6 |
+| D-7 | **End date for running both stacks** and the number of waves | e.g. 2 / 3 / 4 waves within N weeks | Approvers | Before Wave 1 |
+| D-8 | **CU budget** for running both stacks (peak and average ceiling on A) | From the Phase 3 measurement | Platform admin + Data Services | Before Wave 1 (3.6) |
+| D-9 | Point old models at new gold where possible (§5a.5)? | Yes, where safe / No | BI team + Data Services | Before Wave 1 |
+| D-10 | Which reports go in the pilot (Wave 1) | | BI team + business owners | Phase 0 |
 
 ---
 
@@ -595,6 +707,19 @@ Content-Type: application/json
 ```
 
 For **rollback**, use the same call with the **old** model's ID from the Phase 0 inventory.
+
+**Listing which model each report is bound to (used in 4.1, 4.6 and G-13)**
+
+```python
+import sempy.fabric as fabric
+
+reports = fabric.list_reports(workspace="<cons prod workspace>")
+datasets = fabric.list_datasets(workspace="<cons prod workspace>")
+# Check the column names with .columns first; they can differ between versions.
+bindings = reports.merge(datasets, left_on="Dataset Id", right_on="Dataset ID", how="left")
+display(bindings[["Name_x", "Dataset Name"]].rename(columns={"Name_x": "Report"}))
+# Compare this list with the wave plan: every report must be on the model its wave says.
+```
 
 ### A.4 Checking references after a deploy (by hand)
 

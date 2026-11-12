@@ -234,6 +234,7 @@ Nothing should change except a possible **data correction**. Where Slalom's fixe
 
 | Document | Purpose |
 |---|---|
+| [Architecture overview](fabric-architecture-overview.md) | 3-page summary of the design |
 | [Solution architecture](fabric-solution-architecture.md) | How the solution is built: capacities, workspaces, data flow, semantic layer, environments, security, design decisions |
 | [Migration runbook](fabric-capacity-migration-plan.md) | Full procedures, checklists, rollback, risk register, scripts |
 | Runbook §5b | Fabric and Azure DevOps tooling standards |

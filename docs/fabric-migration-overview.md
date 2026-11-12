@@ -1,6 +1,6 @@
 # Overview: New Gold Layer and Semantic Models on Microsoft Fabric
 
-_Read this first. The step-by-step procedures, checklists and scripts are in the [full runbook](fabric-capacity-migration-plan.md)._
+_Read this first. The design is described in the [solution architecture](fabric-solution-architecture.md), and the step-by-step procedures, checklists and scripts are in the [full runbook](fabric-capacity-migration-plan.md)._
 
 | | |
 |---|---|
@@ -234,6 +234,7 @@ Nothing should change except a possible **data correction**. Where Slalom's fixe
 
 | Document | Purpose |
 |---|---|
+| [Solution architecture](fabric-solution-architecture.md) | How the solution is built: capacities, workspaces, data flow, semantic layer, environments, security, design decisions |
 | [Migration runbook](fabric-capacity-migration-plan.md) | Full procedures, checklists, rollback, risk register, scripts |
 | Runbook §5b | Fabric and Azure DevOps tooling standards |
 | Runbook §14–§16 | Go/No-Go, rollback, risk register |

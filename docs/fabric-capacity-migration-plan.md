@@ -1,6 +1,6 @@
 # Runbook: Promoting the New Gold Layer and Semantic Models to Production
 
-> **New to this?** Start with the 5-minute [overview](fabric-migration-overview.md).
+> **New to this?** Start with the [overview](fabric-migration-overview.md). For the design itself (components, environments, decisions), see the [solution architecture](fabric-solution-architecture.md).
 
 | | |
 |---|---|

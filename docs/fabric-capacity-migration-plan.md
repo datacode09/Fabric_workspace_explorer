@@ -5,12 +5,12 @@
 | | |
 |---|---|
 | **Document type** | Migration runbook |
-| **Version** | 2.1 (adds the period where both stacks run and the wave-by-wave cutover) |
+| **Version** | 2.2 (adds Fabric tooling and Azure DevOps standards from the tooling review) |
 | **Status** | Draft – for review |
 | **Last updated** | 2026-11-12 |
 | **Owner** | Data Services (Enterprise Technology) |
 | **Approvers** | BI team lead · Platform/capacity admin · Business owners (BG1, BG2) |
-| **Applies to** | Microsoft Fabric capacity A (prod + non-prod) and capacity B (development area) |
+| **Applies to** | Microsoft Fabric capacity A (prod + non-prod) and capacity B (development area) · Version control: **Azure DevOps (ADO) Repos** |
 
 ---
 
@@ -22,6 +22,7 @@
 4. [Roles and responsibilities](#4-roles-and-responsibilities)
 5. [Guiding principles](#5-guiding-principles)
 5a. [Running both stacks side by side](#5a-running-both-stacks-side-by-side)
+5b. [Fabric and Azure DevOps tooling standards](#5b-fabric-and-azure-devops-tooling-standards)
 6. [Phase overview](#6-phase-overview)
 7. [Phase 0 – Readiness and baseline](#phase-0--readiness-and-baseline)
 8. [Phase 1 – Build and validate on capacity B](#phase-1--build-and-validate-on-capacity-b)
@@ -114,11 +115,15 @@ Each assumption must be **checked in Phase 0** and recorded as passed or failed.
 | A2 | Existing non-prod workspaces on A are connected to Git (or can be) | Workspace settings → Git integration | Connect them in Phase 0 and commit a baseline. If Git is blocked by policy, use **Fallback F2-b** (`fabric-cicd`) or **F2-c** (copy by hand). |
 | A3 | Deployment pipelines exist for elt, transf, cons-bg1 and cons-bg2 | Deployment pipelines list | Create or repair the pipeline before Phase 2. |
 | A4 | Deployment pipelines **pair items by name and type**; new or renamed items are created as new items in the next stage | Microsoft docs; dry run in test | – (design accounts for it) |
-| A5 | References to items in **other workspaces** (elt → transf notebooks, model → lakehouse) are **not remapped automatically** on deploy | Verify with a test deploy in Phase 2 | If they *are* remapped, keep the variable library anyway; it does no harm. |
+| A5 | **Known behaviour (confirmed in Microsoft docs):** references to items in **another workspace** never rebind automatically; they stay pointed at the source object ID (elt → transf notebooks, cons model → transf lakehouse, any shortcut whose target is in another workspace) | Microsoft docs; test deploy in Phase 2 | – (design accounts for it: §5b.3) |
 | A6 | The new semantic models can serve the existing reports **once field names are reconciled** | Field comparison script, Appendix A.2 | Compatibility measures, or report changes, or replacement reports (Phase 4 fallbacks) |
 | A7 | Reads through a shortcut are charged to the **capacity of the workspace doing the reading** | Microsoft docs; Capacity Metrics app | – |
 | A8 | Prod has a known **refresh/ETL window** and an off-peak window | Pipeline schedules; Capacity Metrics app | Agree windows with the business before Phase 3 |
 | A9 | Slalom has **no write access** to prod workspaces | Workspace access lists | Remove access before Phase 3 |
+| A10 | **Known behaviour:** a **Direct Lake** semantic model **doesn't** rebind on deployment; it stays bound to the source stage's lakehouse unless rules are set (data source rules for Direct Lake on SQL; M parameters + parameter rules for Direct Lake on OneLake) | Microsoft docs; check after every deploy (A.5) | – (design accounts for it: §5b.4) |
+| A11 | elt, transf, cons-bg1 and cons-bg2 deployment pipelines all have the **same number of stages** (needed for binding across pipelines, which uses stage position, not stage name) | Deployment pipelines list | Align stage counts before Phase 2 |
+| A12 | Fabric workspaces connect to **Azure DevOps Repos** through the Azure DevOps source-control connection, using a **service principal** (not a personal account) | Workspace Git settings; connection owner | Create the service principal connection in Phase 0 |
+| A13 | A **semantic model refresh** activity in a pipeline refers to the model by item ID, **even within the same workspace**, so it never rebinds | Microsoft docs | – (pass the ID in from a variable library: §5b.3) |
 
 ## 4. Roles and responsibilities
 
@@ -140,7 +145,7 @@ Named individuals and backups are listed in the [Communication plan](#17-communi
 
 ## 5. Guiding principles
 
-1. **One route to prod.** Every prod change goes Git → non-prod on A → deployment pipeline → prod. `trans-dev-2` is never promoted directly.
+1. **One route to prod.** Every prod change goes Azure DevOps (Git) → non-prod on A → deployment pipeline (started from ADO, with approvals) → prod. `trans-dev-2` is never promoted directly.
 2. **Validate where it's cheap.** Heavy reconciliation and load testing run on B. A only gets smoke tests and the final run.
 3. **Add before you replace.** New items run **alongside** the old ones until cutover. Old items are disabled, not deleted, until hypercare ends.
 4. **Keep report identity.** Rebind the existing reports instead of replacing them, so URLs, apps, bookmarks and subscriptions survive.
@@ -215,6 +220,77 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 - The approvers set an **end date** for running both stacks (decision D-7).
 - If it slips by more than one wave, Data Services escalates with a revised plan and CU forecast.
 
+## 5b. Fabric and Azure DevOps tooling standards
+
+These standards come from the Fabric tooling review. They are **mandatory**, and every pull request and every deployment is checked against them.
+
+### 5b.1 Repository and workspace layout (ADO)
+
+- **One ADO repo**, with **one folder per workspace**: `/elt`, `/transf`, `/cons-bg1`, `/cons-bg2`. Each dev workspace on A connects to **its own folder** on the `dev` branch.
+- **A Fabric workspace syncs to exactly one branch and folder.** A single Slalom workspace that mixes notebooks, lakehouses, pipelines and models **can't** sync into this layout. Slalom therefore works in **one branched workspace per target folder** (for example `trans-dev-2-transf`, `trans-dev-2-elt`, `trans-dev-2-cons-bg1`, `trans-dev-2-cons-bg2`) on capacity B, each connected to the same feature branch in the matching folder. The existing `trans-dev-2` content is moved into these workspaces (by committing it to the right folders) before Phase 2.
+- Git connections use the **Azure DevOps source-control connection with a service principal**, so that sync and commit don't depend on one person's account.
+- **No edits in the UI** of dev workspaces on A while the migration runs: a Git update overwrites workspace items with what's in the branch. All changes go through a branch and pull request.
+
+### 5b.2 Naming
+
+Deployment pipelines pair items **by name and type**, and both stacks live in the same workspaces. New items **must** have names that can never clash with old ones:
+
+| Item | Old (example) | New (required pattern) |
+|---|---|---|
+| Gold lakehouse | `lh_gold` | `lh_gold_v2` |
+| Gold notebooks | `nb_gold_<area>` | `nb_gold_v2_<area>` |
+| Semantic models | `sm_bg1_<area>` | `sm_bg1_<area>_v2` |
+| Table setup notebook | – | `nb_gold_v2_setup` |
+| Variable library | – | `vl_env` (one per workspace) |
+
+Renaming an existing item is **not allowed** during the migration: in the next stage it would show up as a new item next to the old one.
+
+### 5b.3 Environment values: variable libraries
+
+Each workspace has a variable library (`vl_env`) with **value sets for dev, test and prod**. The active value set is chosen per stage. What goes where:
+
+| Reference | Mechanism |
+|---|---|
+| Notebook default lakehouse | **Either** turn on *Lakehouse Auto-Binding in Git* in **every** notebook's settings (off by default), **or** set it with `%%configure` reading variable-library name/ID variables. Choose **one** approach for the whole solution (decision D-12) and check it in code review. *(`%%configure` doesn't support item-reference variables; use name and ID variables.)* |
+| Lakehouse paths and IDs inside notebook code | `notebookutils.variableLibrary` (item-reference or name/ID variables). No ABFS paths with literal workspace or lakehouse names |
+| **OneLake shortcuts** whose target is in **another workspace** (e.g. new-gold → silver) | Shortcut defined with **variable-library item references**. Shortcuts within the same workspace are repointed per stage automatically |
+| elt pipeline → transf notebook activities (another workspace) | **GUID variables** for workspace ID and notebook ID, read by the pipeline |
+| Pipeline **semantic model refresh** activities | **GUID variables** for workspace ID and model ID (never rebinds, even in the same workspace, per A13) |
+| Direct Lake model → gold lakehouse | See §5b.4 |
+
+### 5b.4 Direct Lake binding (hard gate)
+
+A Direct Lake model **stays bound to the lakehouse in the source stage** when deployed (A10). Your models are also in a different workspace from the gold lakehouse, which never rebinds (A5). So:
+
+- **Direct Lake on SQL endpoint:** create a **data source rule** for each stage, pointing at that stage's `lh_gold_v2` SQL endpoint.
+- **Direct Lake on OneLake:** build the model with **M parameters** for the workspace and lakehouse, and create **parameter rules** (Text type) for each stage.
+- **After every deployment**, run the Direct Lake source check (Appendix A.5). **A model whose source isn't its own stage's lakehouse fails the gate**, and the deployment is not finished until it's corrected.
+
+### 5b.5 Lakehouse deployment behaviour
+
+- Deployment and Git sync carry **lakehouse metadata and shortcut definitions only**. **Tables, Files folders and data are never deployed.** `lh_gold_v2` arrives empty in each stage.
+- **Deployments and Git updates overwrite the target lakehouse's shortcuts:** shortcuts that aren't in the source are **deleted**. Never create shortcuts in test or prod by hand. **Review the changes in the deployment pipeline before every deploy.**
+- `nb_gold_v2_setup` is an **idempotent** notebook that creates every gold table with its schema, partitioning and table properties (V-Order and so on). It runs **once per stage before the first load**, and again whenever a table definition changes.
+- RLS stays in the **semantic models**. OneLake security data access roles are in preview and aren't used for this migration.
+
+### 5b.6 Promotion with Azure DevOps
+
+**Chosen route (default):** Git (ADO) for dev → **Fabric deployment pipelines** for test and prod, **started from an ADO pipeline** through the Fabric deployment pipelines REST API.
+
+- **ADO branch policies** on `dev`: pull request required; at least one internal reviewer (BI team); linked work item; **build validation** that fails on hard-coded GUIDs, workspace names, ABFS paths or B references in item definitions.
+- **ADO environments** `fabric-test` and `fabric-prod` with **approvals and checks** (prod: Data Services + business owner for wave deployments). The ADO pipeline:
+  1. Starts the deployment for the selected items and stage through the REST API.
+  2. Runs the post-deploy checks (A.4 references, A.5 Direct Lake source, A.3 report bindings).
+  3. On a prod deployment, **tags the release** in ADO (e.g. `release/wave-1-yyyymmdd`), so there is a record of what runs in prod.
+- **Alternative (decision D-11):** deploy straight from ADO with **`fabric-cicd`** (using the Fabric automation tools ADO extension), with release branches and a `parameter.yml` per environment. Prod then has full Git-based version history. **Use one route, not both,** on the same workspaces.
+- Cross-pipeline binding (cons reports ↔ models) relies on matching **stage positions** (A11).
+
+### 5b.7 Inventory, monitoring and alerts
+
+- The **report inventory and dependency map** (0.4, 0.4a, §5a.2) are built from the **admin scanner API** (lineage across all workspaces), using semantic-link-labs or a scheduled notebook. They're refreshed at the end of each wave. This replaces hand-built lineage lists.
+- **Alerts** on both orchestration branches and on old and new model refreshes, through **Activator** / the monitoring hub. Each alert name shows which stack it belongs to.
+- **Capacity Metrics app** for the CU baseline, budget and per-wave comparisons.
+
 ## 6. Phase overview
 
 | Phase | Name | Capacity | Gate to exit |
@@ -243,26 +319,31 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
-| 0.1 | Check assumptions A1–A9 (§3) and record each as passed or failed | Data Services | Completed §3 table |
+| 0.1 | Check assumptions A1–A13 (§3) and record each as passed or failed | Data Services | Completed §3 table |
 | 0.2 | **Record the CU baseline** for A: 14-day peak, average, and throttling events, broken down by item (models, notebooks, pipelines) from the Capacity Metrics app | Platform admin | Metrics export |
 | 0.3 | **Record the data baseline:** row counts, key totals and distinct key counts for every gold table in scope (Appendix A.1) | BI team | Baseline file in the repo |
 | 0.4 | **Record the report inventory:** every prod report bound to the old models, with workspace, report ID, model ID, app membership, subscriptions, Excel/Analyze-in-Excel use, and **its assigned wave** (§5a.1) | BI team | Inventory sheet with wave plan |
-| 0.4a | Build the **dependency map** (§5a.2) from old gold tables → old models → reports, using the lineage view | BI team | Dependency map in the repo |
+| 0.4a | Build the **dependency map** (§5a.2) from old gold tables → old models → reports, using the **admin scanner API** (§5b.7) | BI team | Dependency map in the repo |
 | 0.4b | Build the **KPI cross-check list** (§5a.6) of KPIs that will appear in both stacks | BI team + business | KPI list |
 | 0.5 | **Record the schema of the old models:** tables, columns, measures, relationships and roles (RLS) | BI team | Model schema export (Appendix A.2) |
 | 0.6 | **Back up the old models** (export the definitions to Git/PBIP; for Import models also take an XMLA/.abf backup if allowed) | BI team | Backup location recorded |
-| 0.7 | Connect the existing non-prod workspaces on A to Git (if not already) and **commit the baseline** | BI team | Baseline commit hash |
-| 0.8 | Connect `trans-dev-2` to a feature branch (e.g. `feature/slalom-gold-v2`) in the same repo | Slalom | Branch exists |
-| 0.9 | Set branch protection: pull requests required, at least one internal approver, no direct pushes to the dev/main branches | BI team | Repo settings |
+| 0.7 | Connect the existing non-prod (dev) workspaces on A to their **ADO repo folders** (§5b.1) with the **service principal connection**, and **commit the baseline** | BI team | Baseline commit hash |
+| 0.8 | Create Slalom's **branched workspaces, one per target folder** (§5b.1) on B, connected to `feature/slalom-gold-v2`. Move the existing `trans-dev-2` content into them by committing it to the right folders | Slalom + BI team | Branch and workspace list |
+| 0.9 | Set **ADO branch policies** on `dev` (§5b.6): pull request required, internal reviewer, linked work item, build validation for hard-coded values | BI team | Repo policy settings |
 | 0.10 | Remove any Slalom write access to prod workspaces (A9) | Platform admin | Access review |
 | 0.11 | Agree the change windows (deployment, smoke test, cutover) and the freeze period | Data Services + business | Calendar holds |
+| 0.12 | Set up **ADO environments** `fabric-test` / `fabric-prod` with approvals, and the **ADO deployment pipeline** that calls the Fabric REST API and runs the post-deploy checks (§5b.6). Do a dry run on a trivial item | BI team + platform admin | Pipeline run log |
+| 0.13 | Check that all four deployment pipelines have the **same number of stages** (A11) | BI team | Screenshot |
+| 0.14 | Create the **variable library** `vl_env` in each workspace with dev, test and prod value sets (§5b.3) | BI team | Committed variable library |
+| 0.15 | Record decisions **D-11** (promotion route) and **D-12** (notebook default lakehouse approach) | Data Services | Decision log |
 
 **Exit criteria (gate G0)**
 
-- [ ] A1–A9 recorded; any failed item has a decision and this runbook is updated
+- [ ] A1–A13 recorded; any failed item has a decision and this runbook is updated
 - [ ] CU, data, report and schema baselines are stored in the repo or a shared location
 - [ ] Old models backed up
-- [ ] Git baseline committed; feature branch and branch protection in place
+- [ ] Git baseline committed; Slalom's branched workspaces (one per folder) in place; ADO branch policies, environments and deployment pipeline dry run done
+- [ ] Variable libraries created; stage counts match; D-11 and D-12 recorded
 
 **Fallback**
 
@@ -293,7 +374,8 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 | 1.8 | **Load-test** the new models: refresh plus a typical query load (or replay of the top report pages). Record CU from the Metrics app on B | Slalom | CU comparison vs baseline 0.2 |
 | 1.9 | Check model hygiene: V-Order/OPTIMIZE on gold tables, incremental refresh or partitioning set up, unused and high-cardinality columns removed, Direct Lake guardrails respected for A's SKU | Slalom + BI team | Checklist |
 | 1.10 | Check that **RLS/OLS roles** in the new models match the old ones (same role names, same filter logic, same membership) | BI team | Role comparison |
-| 1.11 | Remove all hard-coded references to B (default lakehouse, GUIDs, ABFS paths). Every environment value comes from a **variable library** or parameter | Slalom | Code review checklist |
+| 1.11 | Remove all hard-coded references to B (default lakehouse, GUIDs, ABFS paths). Every environment value follows **§5b.3**; the notebook default lakehouse follows the D-12 approach; new items follow the **naming rule** (§5b.2); Direct Lake models use the binding method in §5b.4 | Slalom | Code review checklist; ADO build validation passes |
+| 1.12 | Build and test `nb_gold_v2_setup` (§5b.5): run it twice in a row on an empty lakehouse and confirm the second run changes nothing | Slalom | Run log |
 
 **Exit criteria (gate G1)**
 
@@ -301,7 +383,7 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 - [ ] **CU cost of the new models ≤ the old models** at the same load (target: a measurable reduction agreed in §19)
 - [ ] Field-name gap list closed; every report copy renders with no broken visuals
 - [ ] RLS/OLS roles match
-- [ ] No hard-coded references to B in the code
+- [ ] No hard-coded references to B in the code; ADO build validation passes; naming rule followed
 
 **Fallback**
 
@@ -324,15 +406,16 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
-| 2.1 | Slalom opens a **pull request** from `feature/slalom-gold-v2` into the dev branch. Each item goes into its target workspace folder: notebooks/lakehouse → transf, orchestration → elt, models → cons-bg1/bg2 | Slalom | Pull request link |
-| 2.2 | **Code review:** notebook diffs, gold schema changes, new or renamed items, variable-library use, no secrets, no B references | BI team | Approved review |
-| 2.3 | Merge and **sync each dev workspace on A from Git**. Confirm item counts and names match what's expected | BI team | Sync log; item list |
-| 2.4 | Set up the **variable library** (or pipeline parameters) for each stage: workspace IDs, lakehouse IDs, notebook IDs used by elt, silver source, new-gold target | BI team | Variable library values for each stage |
-| 2.5 | Set **deployment rules**: notebook default lakehouse for each stage; semantic model data source/parameters pointing at that stage's new-gold | BI team | Rule screenshots |
+| 2.1 | Slalom opens **ADO pull requests** from `feature/slalom-gold-v2` into `dev`, one per folder (`/transf`, `/elt`, `/cons-bg1`, `/cons-bg2`) | Slalom | Pull request links |
+| 2.2 | **Code review** against §5b: notebook diffs, gold schema changes, naming (§5b.2), variable-library use (§5b.3), Direct Lake binding method (§5b.4), no secrets, no B references; ADO build validation green | BI team | Approved pull requests |
+| 2.3 | Merge and **update each dev workspace on A from Git**. Confirm item counts and names match what's expected, and that **no existing item was renamed or overwritten** | BI team | Sync log; item list |
+| 2.4 | Fill in the `vl_env` **value sets** for dev, test and prod (§5b.3): workspace IDs, lakehouse item references, notebook IDs used by elt, model IDs used by refresh activities, shortcut targets | BI team | Committed variable library |
+| 2.5 | Set up the **deployment rules** each stage needs: Direct Lake **data source rules** (on SQL) or **parameter rules** (on OneLake) per §5b.4; notebook rules if D-12 requires them | BI team | Rule screenshots |
+| 2.5a | Run `nb_gold_v2_setup` in **dev**, then in **test** after the first deployment (§5b.5) | BI team | Run log |
 | 2.6 | In **elt-dev**, add the new notebook activities as a **separate branch** of the orchestration. **Keep** the old branch. Control each with on/off flags **by subject area** (`run_old_<area>`, `run_new_<area>`) from the variable library. A failure in one branch must not stop the other (§5a.3) | BI team | Pipeline definition |
 | 2.7 | Rebind the **dev copies** of the existing reports to the new models (Appendix A.3) | BI team | Rebind log |
-| 2.8 | Deploy **dev → test** in this order: **transf → elt → cons** | BI team | Deployment history |
-| 2.9 | **Check references after deploying:** open the test lakehouse shortcuts, the notebook default lakehouses, the elt notebook activities and the model data source; each must point at **test** items (A5) | BI team | Checklist with screenshots |
+| 2.8 | Deploy **dev → test** **through the ADO deployment pipeline** (§5b.6), in this order: **transf → elt → cons**. **Review the changes** (especially shortcut changes) before approving | BI team | ADO run; deployment history |
+| 2.9 | **Post-deploy checks** (run by the ADO pipeline, and confirmed by a person): references (A.4), **Direct Lake source (A.5)**, report bindings (A.3). Everything must point at **test** items | BI team | Check output |
 | 2.10 | **Smoke test in test** at **off-peak** hours: one full orchestration run with **both branches on**, a light reconciliation (row counts only), and a refresh of both an old and a new model. Also test that a forced failure in one branch leaves the other branch running | BI team | Run results |
 | 2.11 | **UAT in test** by each business group, using the agreed UAT script (key reports, key numbers, RLS spot-checks with test users) | Business owners | UAT sign-off |
 | 2.12 | **Rehearse the wave rollback** (§15) in test: rebind the Wave 1 reports to the old model, confirm they work, then rebind them back to new | BI team | Rehearsal log with timings |
@@ -366,9 +449,9 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
-| 3.1 | Deploy **test → prod**: **transf**, then **elt**, with every `run_new_<area>` flag **off** (the new branch is deployed but not running) | BI team | Deployment history |
-| 3.2 | **Check references after deploying** (as in 2.9): prod notebooks read **prod silver** and write to **prod new-gold**; elt activities point at **prod** notebooks | BI team | Checklist with screenshots |
-| 3.3 | Note: the new gold lakehouse is **empty after deployment** (definitions only, no data). Run the **initial load or backfill** of new gold off-peak | BI team | Run log; duration; CU used |
+| 3.1 | Deploy **test → prod** **through the ADO deployment pipeline** (prod approvals): **transf**, then **elt**, with every `run_new_<area>` flag **off**. Review the shortcut changes before approving. Tag the release (§5b.6) | BI team | ADO run; release tag |
+| 3.2 | **Post-deploy checks** (A.4, A.5): prod notebooks read **prod silver** and write to prod `lh_gold_v2`; elt activities and refresh activities point at **prod** items through `vl_env` | BI team | Check output |
+| 3.3 | Run `nb_gold_v2_setup` in **prod** (§5b.5), then the **initial load or backfill** of new gold off-peak | BI team | Run log; duration; CU used |
 | 3.4 | Turn on the `run_new_<area>` flags for the Wave 1 subject areas. **From here on, both branches run in prod** (§2.2). Watch CU on A for at least 2 cycles | BI team + platform admin | Metrics screenshots |
 | 3.5 | **Reconcile prod new-gold against prod old-gold** (Appendix A.1) and run the KPI cross-check (§5a.6) | BI team | Reconciliation report |
 | 3.6 | **Set the CU budget** for running both stacks (§5a.4) from the measured combined CU, and get it approved | Platform admin + Data Services | Approved budget |
@@ -403,8 +486,8 @@ This is optional. Use it only where the CU budget needs it, because it adds one 
 | # | Action | Owner | Evidence |
 |---|---|---|---|
 | 4.1 | Confirm the cons-test stage holds the new models and **only this wave's** reports rebound (from 2.7/2.8). Reports in later waves must still be bound to the **old** model in test | BI team | Item list with each report's binding |
-| 4.2 | Deploy **cons-bg1 test → prod**, selecting **only** the new semantic model and **this wave's** reports. The pipeline binds those prod reports to the prod copy of the new model. Report IDs stay the same. **Don't select reports from later waves** | BI team | Deployment history; list of selected items |
-| 4.3 | Check the deployment rule: the prod model points at **prod new-gold** | BI team | Screenshot |
+| 4.2 | Deploy **cons-bg1 test → prod** **through the ADO deployment pipeline** (prod approvals), selecting **only** the new semantic model and **this wave's** reports. Reports bound to the new model are rebound by the pipeline (same workspace). **Don't select reports from later waves.** Tag the release | BI team | ADO run; list of selected items; release tag |
+| 4.3 | **Direct Lake source check (A.5): the prod model must read prod `lh_gold_v2`.** If it reads the test lakehouse, fix the rule and redeploy; the wave doesn't go ahead until this passes | BI team | Check output |
 | 4.4 | **Refresh (or reframe) the new prod model**; confirm it succeeds and record how long it takes | BI team | Refresh history |
 | 4.5 | **Check each rebound report:** open every page, compare key numbers with the baseline (0.3) **and with the matching old-stack reports** (KPI cross-check, §5a.6), test RLS with test users | BI team + business | Check log |
 | 4.6 | Check that **reports not in this wave are still bound to the old models** and working | BI team | Binding check (Appendix A.3, list bindings) |
@@ -513,6 +596,8 @@ Must be completed and signed **before each wave's Phase 4**. For later waves, cr
 | G-12 | Capacity A has headroom for the window (Metrics app check on the day), and the CU budget for running both stacks is being met | | |
 | G-13 | This wave's report list is final; **reports from other waves have been checked to still be on the old model in test** | | |
 | G-14 | KPI cross-check passing; any intended differences explained to users of **both** stacks | | |
+| G-15 | **Direct Lake source check (A.5) passed in test** for every model in this wave, and the prod rules are set up | | |
+| G-16 | ADO deployment pipeline, approvals and post-deploy checks worked in the test deployment for this wave | | |
 
 **Decision:** Go / No-Go · **Decided by:** __________ · **Date/time:** __________
 
@@ -541,6 +626,7 @@ The rollback covers **one wave at a time**. Earlier waves that are stable stay o
 | R4 | For any **replaced** reports in this wave: restore the old report in the workspace app; move subscriptions back | |
 | R5 | Check the key reports against the baseline numbers | |
 | R6 | Tell users the rollback is done (§17) | |
+| R6a | **Make the same rebind in dev and commit it to Git** (a pull request reverting the wave's report bindings), and **freeze the cons deployment pipeline** until that's merged. Otherwise the next deployment rebinds the reports to the new model again | BI team |  |
 | R7 | Move the wave back in the wave plan; root-cause analysis; fix in the feature branch; go back to the right phase (usually Phase 2) | |
 
 **Escalation – roll back every wave:** only if the defect is in something every wave shares (for example a new gold table used by all the new models, or an RLS defect in the new models). Run R1–R6 for every completed wave, starting with the most recent. The approvers decide.
@@ -557,7 +643,7 @@ The rollback covers **one wave at a time**. Earlier waves that are stable stay o
 
 | ID | Risk | Likelihood | Impact | Mitigation | Fallback |
 |---|---|---|---|---|---|
-| R-01 | References to other workspaces still point at dev/test after deploying | Medium | High | Variable library; reference check after every deploy (2.9, 3.2) | Fix the values and redeploy; prod gold isn't consumed until Phase 4 |
+| R-01 | References to other workspaces (pipeline → notebook, model refresh activities, shortcuts) still point at dev/test after deploying (A5, A13) | **High** (by design without §5b.3) | High | `vl_env` per §5b.3; automated post-deploy checks (A.4) | Fix the values and redeploy; prod gold isn't consumed until Phase 4 |
 | R-02 | Field-name gaps break report visuals | Medium | High | Comparison scripts (A.2); compatibility measures; visual check in B and test | F4-a / F4-b; rollback |
 | R-03 | New gold numbers differ from old | Medium | High | ≥ 3-cycle reconciliation on B; variance log with business sign-off | F1-a; rollback |
 | R-04 | New models aren't cheaper; A stays throttled | Low–Medium | High | Hard CU gate G1; model hygiene checklist | F1-b: don't promote |
@@ -574,6 +660,12 @@ The rollback covers **one wave at a time**. Earlier waves that are stable stay o
 | R-15 | **An old item is retired while something still uses it** | Low–Medium | High | Dependency map plus lineage check before every retirement (5.3); disable, don't delete | Turn the item back on (R1–R2) |
 | R-16 | A failure in one orchestration branch **stops the other** | Medium | High | Separate branches with independent dependencies (§5a.3); failure tested in 2.10 | Run the stalled branch by hand; fix the dependency |
 | R-17 | Developers build **new reports on the old models** while both stacks run | Medium | Medium | Mark old models "(legacy)" in their description; new models Promoted; review process for new reports | Add the report to a later wave |
+| R-18 | **A Direct Lake model in prod reads the test lakehouse** (A10) | **High** without rules | Critical | §5b.4 rules; Direct Lake source check as a hard gate (A.5) | Fix the rule, redeploy, re-check before the wave goes ahead |
+| R-19 | **A deployment or Git update deletes shortcuts** in the target lakehouse | Medium | High | No manual shortcuts in test or prod; review changes before every deploy (§5b.5) | Restore by redeploying from source; re-run catch-up loads |
+| R-20 | Slalom's mixed workspace **can't be synced** into the folder-per-workspace layout | **High** if not addressed | Medium | Branched workspaces, one per target folder (§5b.1, step 0.8) | Move items into the right folders by hand in ADO before the pull request |
+| R-21 | **A prod rollback is undone** by the next deployment | Medium | High | Rollback step R6a (mirror in dev, commit, freeze cons pipeline) | Rebind again; enforce the freeze |
+| R-22 | Notebooks run against the **wrong default lakehouse** after sync or deploy | Medium | High | One D-12 approach checked in code review; post-deploy check (A.4) | Fix the setting or variable; rerun the affected loads |
+| R-23 | Edits in the UI are overwritten by the next Git update, or drift from Git | Medium | Medium | No UI edits rule (§5b.1); access review | Recommit the change through a pull request |
 
 ## 17. Communication plan
 
@@ -623,6 +715,8 @@ Tolerances must be agreed with the business owners before Phase 1 ends. Defaults
 | D-8 | **CU budget** for running both stacks (peak and average ceiling on A) | From the Phase 3 measurement | Platform admin + Data Services | Before Wave 1 (3.6) |
 | D-9 | Point old models at new gold where possible (§5a.5)? | Yes, where safe / No | BI team + Data Services | Before Wave 1 |
 | D-10 | Which reports go in the pilot (Wave 1) | | BI team + business owners | Phase 0 |
+| D-11 | **Promotion route**: deployment pipelines started from ADO (default) **or** `fabric-cicd` from ADO release branches | Default / fabric-cicd | Data Services + BI team | Phase 0 |
+| D-12 | **Notebook default lakehouse**: *Lakehouse Auto-Binding in Git* on every notebook **or** `%%configure` with variable-library variables | Auto-binding / %%configure | BI team + Slalom | Phase 0 |
 
 ---
 
@@ -712,18 +806,9 @@ For **rollback**, use the same call with the **old** model's ID from the Phase 0
 
 **Listing which model each report is bound to (used in 4.1, 4.6 and G-13)**
 
-```python
-import sempy.fabric as fabric
+Use the **admin scanner API** (lineage across workspaces), through semantic-link-labs or a scheduled notebook, to list every report with its bound model. Compare the output with the wave plan: every report must be on the model its wave says. Store each run in the repo next to the inventory. *(Check the semantic-link-labs admin helpers available in your installed version before scripting this.)*
 
-reports = fabric.list_reports(workspace="<cons prod workspace>")
-datasets = fabric.list_datasets(workspace="<cons prod workspace>")
-# Check the column names with .columns first; they can differ between versions.
-bindings = reports.merge(datasets, left_on="Dataset Id", right_on="Dataset ID", how="left")
-display(bindings[["Name_x", "Dataset Name"]].rename(columns={"Name_x": "Report"}))
-# Compare this list with the wave plan: every report must be on the model its wave says.
-```
-
-### A.4 Checking references after a deploy (by hand)
+### A.4 Checking references after a deploy (automated in the ADO pipeline, confirmed by a person)
 
 For every stage you deploy to, confirm and record (with screenshots):
 
@@ -731,7 +816,29 @@ For every stage you deploy to, confirm and record (with screenshots):
 2. Each notebook's **default lakehouse** → that stage's lakehouse
 3. Each **elt notebook activity** → that stage's transf notebook (workspace ID + notebook ID)
 4. Each **semantic model** data source / parameter → that stage's new-gold
-5. **Variable library** values match the expected values for that stage
+5. **Variable library**: the active value set is the right one for that stage, and its values match what's expected
+6. Each **semantic model refresh activity** in elt → that stage's model ID
+7. **Shortcut list** in each lakehouse is the same as before the deploy, with no unexpected deletions (§5b.5)
+
+### A.5 Direct Lake source check (hard gate after every deploy)
+
+```python
+# Confirms which lakehouse each Direct Lake model is actually reading from.
+# semantic-link-labs provides helpers for this (e.g. sempy_labs.directlake.get_direct_lake_source);
+# check the exact function name and return shape in your installed version.
+import sempy_labs.directlake as dl
+
+models = ["<sm_bg1_area_v2>", "<sm_bg2_area_v2>"]
+expected_ws = "<this stage's transf workspace>"
+expected_lh = "lh_gold_v2"
+
+for m in models:
+    src = dl.get_direct_lake_source(dataset=m, workspace="<this stage's cons workspace>")
+    print(m, "→", src)
+    # FAIL the gate if the source workspace or lakehouse isn't this stage's expected_ws / expected_lh
+```
+
+If the check fails: fix the data source rule or parameter rule (§5b.4), redeploy the model, and run the check again.
 
 ---
 
@@ -744,5 +851,13 @@ For every stage you deploy to, confirm and record (with screenshots):
 - [Fabric deployment pipelines](https://learn.microsoft.com/fabric/cicd/deployment-pipelines/intro-to-deployment-pipelines)
 - [Fabric Git integration](https://learn.microsoft.com/fabric/cicd/git-integration/intro-to-git-integration)
 - [Power BI REST API – Rebind Report In Group](https://learn.microsoft.com/rest/api/power-bi/reports/rebind-report-in-group)
+- [Deployment pipelines: autobinding](https://learn.microsoft.com/fabric/cicd/deployment-pipelines/understand-the-deployment-process#autobinding)
+- [Assign a workspace to a deployment pipeline: Direct Lake binding limitation](https://learn.microsoft.com/fabric/cicd/deployment-pipelines/assign-pipeline#considerations-and-limitations)
+- [Dependency binding in cross-workspace deployment](https://learn.microsoft.com/fabric/cicd/cross-workspace-dependency-binding)
+- [Lakehouse Git integration and deployment pipelines](https://learn.microsoft.com/fabric/data-engineering/lakehouse-git-deployment-pipelines)
+- [Variable library overview](https://learn.microsoft.com/fabric/cicd/variable-library/variable-library-overview)
+- [Item reference variable type](https://learn.microsoft.com/fabric/cicd/variable-library/item-reference-variable-type)
+- [Fabric CI/CD concepts and best practices](https://learn.microsoft.com/fabric/fundamentals/understand-best-practices-fabric-cicd)
+- [CI/CD for Data Factory pipelines: known limitations](https://learn.microsoft.com/fabric/data-factory/cicd-pipelines#known-limitations)
 - [Semantic link labs (GitHub)](https://github.com/microsoft/semantic-link-labs)
 - [fabric-cicd (GitHub)](https://github.com/microsoft/fabric-cicd)

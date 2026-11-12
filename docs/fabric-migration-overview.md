@@ -27,16 +27,29 @@ Data volume keeps growing, so our semantic models are getting slower and using m
  Capacity B (dev area)                 Capacity A (non-prod → prod)
  ┌──────────────────────┐   Git PR    ┌──────────────────────────────────────┐
  │ trans-dev-2 (Slalom) │ ──────────▶ │ dev ──▶ test ──▶ prod                 │
- │ build + heavy tests  │             │      (existing deployment pipelines) │
- └──────────────────────┘             └──────────────────────────────────────┘
+ │ build + heavy tests  │  (Azure     │  (deployment pipelines, started from │
+ └──────────────────────┘   DevOps)   │   Azure DevOps with approvals)       │
+                                      └──────────────────────────────────────┘
 ```
 
 1. **Build and prove it on B.** Slalom runs the new gold against prod silver and checks it against the current gold for at least 3 cycles. They also confirm the new models **use fewer CUs** than the old ones. If they don't, nothing goes further.
-2. **Merge through Git into the existing non-prod workspaces on A.** No separate route to prod. Environment values (workspace and lakehouse IDs) come from variable libraries, not hard-coded values.
+2. **Merge through Azure DevOps into the existing non-prod workspaces on A.** Pull requests are reviewed and checked automatically. No separate route to prod. Environment values (workspace, lakehouse and model IDs) come from variable libraries, not hard-coded values.
 3. **Run the new gold in prod with no reports reading it.** It runs next to the old gold, and the two are compared.
 4. **Move reports in waves.** We start with a small pilot (1–3 reports), then move groups of reports by subject area. Each report is **rebound**, not replaced, so users keep the same links.
 5. **Both stacks run side by side for a while.** Reports not yet moved stay on the old models. We check that the same KPI gives the same number in both stacks, and we watch A's CU usage against a budget each week.
 6. **Retire old items as they become unused**, then close out once the last wave is done.
+
+## Tools
+
+| Need | Tool |
+|---|---|
+| Version control and code review | **Azure DevOps Repos**: one folder per workspace, branch policies, required reviewers, automated checks for hard-coded values |
+| Slalom's development | One branched workspace **per target folder** on capacity B |
+| Moving to test and prod | **Fabric deployment pipelines, started from an Azure DevOps pipeline** with approvals; every prod release is tagged |
+| Per-environment settings | **Fabric variable libraries** (dev, test and prod values) |
+| Checks after each deploy | Automated scripts in the ADO pipeline: references, **which lakehouse each Direct Lake model reads from**, report bindings |
+| Inventory and lineage | Admin scanner API (through semantic-link-labs) |
+| Monitoring | Capacity Metrics app, monitoring hub, Activator alerts |
 
 ## How we keep it safe
 
@@ -45,6 +58,8 @@ Data volume keeps growing, so our semantic models are getting slower and using m
 - **Old items are switched off first and deleted later**, only after their rollback period ends.
 - **Go/No-Go before every wave.** A single "No" stops that wave.
 - **An RLS/security defect means immediate rollback.** We don't try to fix it in place.
+- **Fabric's known pitfalls are covered:** Direct Lake models and references to other workspaces don't repoint by themselves when deployed, and deployments can delete shortcuts. Each has a rule, and an automated check after every deployment.
+- **A rollback is also made in Azure DevOps**, so the next deployment doesn't undo it.
 
 ## Who does what
 
@@ -65,6 +80,8 @@ Data volume keeps growing, so our semantic models are getting slower and using m
 | D-7 | End date for running both stacks and the number of waves | Before Wave 1 |
 | D-8 | CU budget on A while both stacks run | Before Wave 1 |
 | D-10 | Which reports go in the pilot wave | During readiness |
+| D-11 | Promotion route: deployment pipelines started from ADO (default), or `fabric-cicd` | During readiness |
+| D-12 | How notebooks find their default lakehouse in each environment | During readiness |
 
 The full list is in [§19 of the runbook](fabric-capacity-migration-plan.md#19-open-decisions).
 
@@ -77,7 +94,7 @@ Nothing should change except a possible **data correction**. Where Slalom's fixe
 | If you are… | Read |
 |---|---|
 | An approver | §14 Go/No-Go, §15 Rollback, §16 Risks, §19 Decisions |
-| On the BI team or with Slalom | Phases 0–6 and Appendix A (scripts) |
+| On the BI team or with Slalom | §5b Tooling standards, Phases 0–6 and Appendix A (scripts) |
 | A business owner | §5a.1 Wave plan, §17 Communication, §18 Acceptance criteria |
 
 ➡ **[Open the full runbook](fabric-capacity-migration-plan.md)**

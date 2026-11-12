@@ -1,5 +1,7 @@
 # Runbook: Promoting the New Gold Layer and Semantic Models to Production
 
+> **New to this?** Start with the 5-minute [overview](fabric-migration-overview.md).
+
 | | |
 |---|---|
 | **Document type** | Migration runbook |

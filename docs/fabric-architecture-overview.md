@@ -4,90 +4,91 @@ _A summary of the design. Full detail is in the [solution architecture](fabric-s
 
 | | |
 |---|---|
-| **Version / status** | 1.0 · Draft for review · 2026-11-12 |
+| **Version / status** | 2.0 · Final draft for review · 2026-11-23 |
 | **Owner** | Data Services, Enterprise Technology |
 
 ## 1. What we're building
 
-A more efficient **gold layer** and new **Direct Lake semantic models** for business groups BG1 and BG2. They replace the current ones to remove throttling on Fabric capacity **A**. **Existing reports are kept and rebound** to the new models. During the migration, the old and new stacks run side by side.
+A more efficient **gold layer** and new **Direct Lake semantic models** for business groups BG1 and BG2, to remove throttling on Fabric capacity **A**. The **new silver-to-gold processing runs on capacity B**. **Orchestration and all semantic models stay on A.** **Existing reports are kept and rebound** to the new models. During the migration, the old and new stacks run side by side.
 
 ## 2. Architecture at a glance
 
 ```
- Capacity B (development)                   Capacity A (prod + non-prod; dev / test / prod)
- ┌─────────────────────────┐   ADO PR    ┌──────────────────────────────────────────────────┐
- │ Slalom branched         │ ──────────▶ │ elt      : master pipeline (old + new branches)  │
- │ workspaces (build,      │             │ transf   : silver ─▶ lh_gold (old)               │
- │ validation, load tests) │             │                    ─▶ lh_gold_v2 (new)           │
- │ reads prod silver via   │             │ cons-bg1 : sm_*_v2 (Direct Lake) ─▶ reports      │
- │ shortcuts (paid by B)   │             │ cons-bg2 : sm_*_v2 (Direct Lake) ─▶ reports      │
- └─────────────────────────┘             └──────────────────────────────────────────────────┘
-          Azure DevOps Repos ─▶ dev ─▶ test ─▶ prod  (deployment pipelines started from ADO)
+ Capacity A  (orchestration + semantic layer)            Capacity B  (new gold processing)
+ ┌──────────────────────────────────────────────┐        ┌─────────────────────────────────┐
+ │ elt: master pipeline ── new branch ──────────┼──────▶ │ transf-v2: new gold notebooks   │
+ │  └─ old branch ─▶ transf (old gold, retiring)│        │   reads silver (shortcut to A)  │
+ │ silver ◀──────────────── shortcut ───────────┼─────── │   writes lh_gold_v2             │
+ │ cons-bg1/bg2: lh_gold_v2_ref (shortcuts) ◀───┼─────── │                                 │
+ │   new models (Direct Lake) + old models      │        │ dev / test / prod all on B      │
+ │   reports (rebound in waves)                 │        │ (dev/test Spark capped)         │
+ └──────────────────────────────────────────────┘        └─────────────────────────────────┘
+       Azure DevOps Repos ─▶ dev ─▶ test ─▶ prod  (deployment pipelines started from ADO)
 ```
 
 ## 3. Key design principles
 
-- **Prod stays on capacity A.** B is a development area, and nothing on A depends on it.
-- **Efficiency over capacity.** Load drops because the gold layer and models cost less to run, not because more compute is added.
+- **Each workload on the right capacity.** Heavy Spark transformation on B; orchestration and the semantic layer on A.
+- **Reports keep working if B has a problem.** New models read new gold through **shortcuts on A** (`lh_gold_v2_ref`). If B is paused or throttled, reports keep the last loaded data.
+- **Prod on B is production-grade.** B is never paused; it has named admins, monitoring, alerts and on-call.
 - **Report identity is preserved.** Reports are rebound, never recreated, so URLs, apps and subscriptions survive.
-- **One source of truth.** All item definitions live in Azure DevOps. There are no UI edits outside development.
-- **Explicit binding.** Environment values come from variable libraries and deployment rules, never hard-coded.
-- **Security in the semantic layer.** RLS is defined and tested in the models.
+- **One source of truth, explicit binding.** All definitions in Azure DevOps; environment values in variable libraries and deployment rules.
+- **Security in the semantic layer.** RLS is defined and tested in the models on A.
 
 ## 4. Components
 
 | Area | Design |
 |---|---|
-| **Capacities** | **A**: all prod and non-prod workspaces. **B**: development only. Same region. Surge protection on A; Spark autoscale billing is the first relief valve |
-| **Workspaces** | Per environment: `elt` (orchestration), `transf` (silver → gold), `cons-bg1` / `cons-bg2` (models and reports) |
-| **Gold layer** | `lh_gold_v2` (Delta, V-Order, scheduled OPTIMIZE, partitioning only where needed). Tables created by an idempotent setup notebook. Silver read through shortcuts set from variables |
-| **Orchestration** | One master pipeline with independent **old and new branches**, switched per subject area (`run_old_<area>` / `run_new_<area>`). A failure in one branch doesn't stop the other |
-| **Semantic models** | Direct Lake, one per business group and subject area (`sm_<bg>_<area>_v2`). Compatibility measures keep the field names existing reports use |
-| **Reports** | Kept as-is; rebound to the new models one group (wave) at a time. Each report is on exactly one model at a time |
+| **Capacity A** | `elt` (orchestration), `transf` (old gold, retiring), `cons-bg1` / `cons-bg2` (old and new models, reports, `lh_gold_v2_ref`). Surge protection on |
+| **Capacity B** | `transf-v2` dev / test / prod: new gold notebooks, `lh_gold_v2`, setup notebook. Never paused. Surge protection; dev/test Spark pools capped |
+| **Region** | A and B **must be in the same region** (required for Direct Lake and the shortcuts between them) |
+| **Gold layer** | `lh_gold_v2` on B (Delta, V-Order, OPTIMIZE). Tables created by an idempotent setup notebook. Reads silver on A through shortcuts set from variables |
+| **Orchestration** | elt on A starts the `transf-v2` notebooks on B (IDs from the variable library). Independent old and new branches, switched per subject area. A failure on B doesn't stop the old branch |
+| **Semantic models** | All on A. New models: Direct Lake on `lh_gold_v2_ref`, one per business group and subject area (`sm_<bg>_<area>_v2`). Compatibility measures keep the field names existing reports use |
+| **Reports** | Kept; rebound to the new models one group (wave) at a time |
+| **Run identity** | Service principal or workspace identity, with access to silver (A), `lh_gold_v2` (B) and `lh_gold_v2_ref` (A) |
 
-## 5. Running both stacks side by side
+## 5. Who pays for what
 
-| Shared | Separate (old vs new) |
+| Work | Capacity |
 |---|---|
-| Prod silver; master pipeline; report items | Gold lakehouse, gold notebooks, semantic models, orchestration branch |
+| New gold notebooks; reading silver through shortcuts | **B** |
+| Orchestration; old gold (until retired); refreshes and report queries for all models; reads through `lh_gold_v2_ref` | **A** |
+| Storage of `lh_gold_v2` | B's storage bill (no CUs) |
 
-- **Consistency:** an automated KPI cross-check compares the two stacks after every load.
-- **Retiring old items:** a dependency map (from the admin scanner API) shows when an old item has nothing using it. It's then switched off, and removed later.
-- **End state:** a single stack, with the old branch, `lh_gold`, the old models and the switch flags removed.
+**Running both stacks side by side:** they share silver, the master pipeline and the report items. An automated KPI cross-check compares the two after every load. Old items are switched off as soon as nothing uses them, so A's load falls with each wave. The end state is gold processing only on B, with A holding orchestration and the semantic layer.
 
 ## 6. Environments and release
 
-| Environment | Capacity | Changed by |
-|---|---|---|
-| Slalom development | B | Feature branches (one branched workspace per layer) |
-| dev | A | Sync from Azure DevOps `dev` branch |
-| test / prod | A | Fabric deployment pipelines, **started from Azure DevOps** with approvals and post-deploy checks |
+| Layer | dev | test | prod |
+|---|---|---|---|
+| elt, transf (old), cons-bg1, cons-bg2 | A | A | A |
+| **transf-v2 (new gold)** | **B** | **B** | **B** |
 
-- **Azure DevOps:** one folder per workspace; pull requests with a BI team reviewer; build validation that rejects hard-coded IDs and references to B; release tags for prod.
-- **Variable libraries** (dev, test and prod values) hold workspace, lakehouse, notebook and model IDs, and shortcut targets.
+- **Azure DevOps:** one repo, one folder per workspace (including `/workspaces/transf-v2`). Pull requests need a BI team reviewer; build validation rejects hard-coded IDs; prod releases are tagged.
+- **Promotion:** one deployment pipeline per layer, all with the same number of stages, started from ADO with approvals. Release order: transf-v2 → elt → cons. Post-deploy checks cover references across capacities, the Direct Lake source and shortcut targets.
+- **Access to prod on B:** BI team, deployment service principal and run identity only. No Slalom.
 
 **Fabric behaviours the design accounts for:**
 
 | Behaviour | Response |
 |---|---|
-| References to items in another workspace never rebind | Variable-library IDs |
+| References to items in another workspace or capacity never rebind | Variable-library IDs and item references |
 | Direct Lake models stay bound to the source environment's lakehouse | Data source or parameter rules, checked after every deploy |
 | Deployments reset a lakehouse's shortcuts | No manual shortcuts in test or prod; review before deploying |
-| Items are paired by name across stages | `_v2` naming; no renames |
-| Tables and data are never deployed | Setup notebook per environment |
+| Items paired by name; tables never deployed | `_v2` naming, no renames; setup notebook per environment |
 
-## 7. Security, cost and operations
+## 7. Operations
 
-- **Security:** RLS in the models; Slalom has no access to prod; service principal for Git and deployments; separation of duties (developers raise pull requests, the BI team approves and deploys).
-- **Cost:** shortcut reads are charged to the reading workspace's capacity, so validation on B costs A nothing. A CU budget applies while both stacks run.
-- **Observability:** Capacity Metrics app (CU), monitoring hub and Activator alerts (runs, refreshes), reconciliation and KPI cross-check notebooks (correctness), Azure DevOps history (audit).
+- **Monitoring:** Capacity Metrics app for **both A and B**; monitoring hub; Activator alerts per branch; a **new gold freshness alert**.
+- **Failure modes:** if B is unavailable, new-stack reports show the last loaded data, the old branch keeps running, and the freshness alert fires. If A is throttled, surge protection and the CU budget apply.
 
 ## 8. Key decisions and open items
 
 | Decided | Open |
 |---|---|
-| All workspaces stay on A; B is development only | Q-1 Direct Lake flavour per model (OneLake / SQL endpoint) |
-| Rebind reports, don't replace them | Q-2 Promotion route: deployment pipelines from ADO, or `fabric-cicd` |
-| Old and new stacks side by side, with flags by subject area | Q-3 Notebook default lakehouse mechanism |
-| Azure DevOps as source of truth; deployment pipelines started from ADO | Q-4 Spark autoscale billing for gold notebooks |
-| Variable libraries for environment values; `_v2` naming; RLS in models | Q-5 Future of capacity B |
+| New gold processing (dev/test/prod) on B; orchestration and all models on A | Q-1 Direct Lake flavour per model |
+| New models read new gold through shortcuts on A | Q-2 Promotion route (deployment pipelines from ADO, or `fabric-cicd`) |
+| Rebind reports; old and new stacks side by side | Q-3 Notebook default lakehouse mechanism |
+| ADO as source of truth; deployment pipelines per layer, started from ADO | Q-4/Q-5 Spark autoscale billing on B; B's SKU size |
+| Variable libraries; `_v2` naming; RLS in models; service principal / workspace identity for runs | Q-6 Run identity type |

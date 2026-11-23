@@ -256,6 +256,7 @@ Nothing should change except a possible **data correction**. Reports stay in the
 |---|---|
 | [Architecture overview](fabric-architecture-overview.md) | 3-page summary of the design |
 | [Solution architecture](fabric-solution-architecture.md) | How the solution is built: capacities, workspaces, data flow, semantic layer, environments, security, operations, design decisions |
+| [Cutover plan](fabric-cutover-plan.md) | Simple step-by-step cutover, including backfill, Go/No-Go and rollback |
 | [Migration runbook](fabric-capacity-migration-plan.md) | Full procedures, checklists, rollback, risk register, scripts |
 | Runbook §5b | Fabric and Azure DevOps tooling standards |
 | Runbook §14–§16 | Go/No-Go, rollback, risk register |
